@@ -1,23 +1,12 @@
 import os
 from dotenv import load_dotenv
 load_dotenv()
-
-TOP_PAIRS = [
-    "BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","BNB/USDT:USDT",
-    "XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT","LINK/USDT:USDT",
-    "SUI/USDT:USDT","NEAR/USDT:USDT","DOT/USDT:USDT","LTC/USDT:USDT",
-    "UNI/USDT:USDT","APT/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT",
-    "ATOM/USDT:USDT","FIL/USDT:USDT","ICP/USDT:USDT","RENDER/USDT:USDT"
-]
-
+TOP_PAIRS = ["BTC/USDT:USDT","ETH/USDT:USDT","SOL/USDT:USDT","BNB/USDT:USDT","XRP/USDT:USDT","ADA/USDT:USDT","AVAX/USDT:USDT","LINK/USDT:USDT","SUI/USDT:USDT","NEAR/USDT:USDT","DOT/USDT:USDT","LTC/USDT:USDT","UNI/USDT:USDT","APT/USDT:USDT","ARB/USDT:USDT","OP/USDT:USDT","ATOM/USDT:USDT","FIL/USDT:USDT","ICP/USDT:USDT","RENDER/USDT:USDT"]
 class BotConfig:
     def __init__(self):
         self.api_key = os.getenv("BYBIT_API_KEY","")
         self.api_secret = os.getenv("BYBIT_API_SECRET","")
         self.testnet = os.getenv("BYBIT_TESTNET","False").lower()=="true"
-        # === MODO PAPEL - NOVO V3 ===
-        # True = SIMULA com preco real, NAO envia ordens reais
-        # False = OPERA A SERIO com dinheiro real
         self.paper_trading = os.getenv("PAPER_TRADING","True").lower()=="true"
         self.paper_initial_balance = float(os.getenv("PAPER_INITIAL_BALANCE","1000.0"))
         self.leverage = int(os.getenv("LEVERAGE","3"))
