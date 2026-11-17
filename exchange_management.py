@@ -5,9 +5,8 @@ class BybitExchangeManager:
     def __init__(self, config):
         self.cfg = config
         self.exchange = self._init_exchange()
-
     def _init_exchange(self):
-        ex = ccxt.bybit({
+        ex = ccxt.【entity-bybit¦canonical_name=bybit】({
             "apiKey": self.cfg.api_key,
             "secret": self.cfg.api_secret,
             "enableRateLimit": True,
@@ -18,11 +17,6 @@ class BybitExchangeManager:
         try: ex.load_markets()
         except Exception as e: logger.warning(f"load_markets: {e}")
         return ex
-
-    def reload_credentials(self, k,s,testnet):
-        self.cfg.api_key=k; self.cfg.api_secret=s; self.cfg.testnet=testnet
-        self.exchange=self._init_exchange()
-
     def get_total_equity(self):
         try:
             b=self.exchange.fetch_balance(params={"type":"UNIFIED"})
@@ -33,16 +27,13 @@ class BybitExchangeManager:
         except Exception as e:
             logger.error(f"get_total_equity: {e}")
             return -1.0
-
     def set_hedge_mode_and_leverage(self, symbol, leverage):
         try: self.exchange.set_position_mode(hedged=True, symbol=symbol)
         except Exception as e: logger.debug(f"position_mode: {e}")
         try: self.exchange.set_leverage(leverage, symbol)
         except Exception as e: logger.debug(f"leverage: {e}")
-
     def fetch_ticker(self, symbol):
         return self.exchange.fetch_ticker(symbol)
-
     def fetch_positions_live(self, symbol):
         try:
             pos=self.exchange.fetch_positions([symbol])
@@ -50,47 +41,46 @@ class BybitExchangeManager:
             for p in pos:
                 contracts=float(p.get("contracts") or 0)
                 if contracts>0:
-                    out.append({
-                        "side": p.get("side"),
-                        "contracts": contracts,
-                        "entryPrice": float(p.get("entryPrice") or 0),
-                        "markPrice": float(p.get("markPrice") or 0),
-                        "unrealizedPnl": float(p.get("unrealizedPnl") or 0),
-                        "positionIdx": p.get("info",{}).get("positionIdx"),
-                    })
+                    out.append({"side": p.get("side"),"contracts": contracts,"entryPrice": float(p.get("entryPrice") or 0),"markPrice": float(p.get("markPrice") or 0),"unrealizedPnl": float(p.get("unrealizedPnl") or 0),"positionIdx": p.get("info",{}).get("positionIdx")})
             return out
         except Exception as e:
             logger.error(f"fetch_positions: {e}")
             return []
-
     def calculate_qty(self, symbol, margin_usdt, leverage, price):
+        # CORRECAO V4: nunca devolve 0 para BTC/ETH caros
         try:
             market=self.exchange.market(symbol)
             notional=margin_usdt*leverage
             raw=notional/price
-            prec=market.get("precision",{}).get("amount")
             limits=market.get("limits",{})
             min_amt=float(limits.get("amount",{}).get("min",0.001) or 0.001)
             min_cost=float(limits.get("cost",{}).get("min",5.0) or 5.0)
             qty=float(self.exchange.amount_to_precision(symbol, raw))
+            # Se o arredondamento deu 0, usa o valor bruto arredondado a 6 casas
+            if qty<=0:
+                qty=round(raw,6)
+                if qty<=0: qty=min_amt
             qty=max(qty, min_amt)
+            # Se ainda for pequeno demais para o custo minimo, SOBE a qty, nao desce
             if qty*price < min_cost:
-                qty=float(self.exchange.amount_to_precision(symbol, (min_cost*1.05)/price))
+                need=(min_cost*1.05)/price
+                qty=float(self.exchange.amount_to_precision(symbol, need))
+                if qty<=0: qty=round(need,6)
+                qty=max(qty, min_amt)
             return qty
         except Exception as e:
-            logger.error(f"calc_qty: {e}")
-            return 0.0
-
+            # Fallback em Papel: sem mercado, calcula na mao - nunca trava
+            logger.error(f"calc_qty fallback: {e}")
+            raw=(margin_usdt*leverage)/price if price>0 else 0
+            return round(raw,6) if raw>0 else 0.001
     def place_market_order(self, symbol, side, qty, position_idx, reduce_only=False):
         if qty<=0: return None
         try:
-            o=self.exchange.create_order(symbol=symbol,type="market",side=side,amount=qty,
-                params={"positionIdx":position_idx,"reduceOnly":reduce_only})
+            o=self.exchange.create_order(symbol=symbol,type="market",side=side,amount=qty, params={"positionIdx":position_idx,"reduceOnly":reduce_only})
             return o
         except Exception as e:
-            logger.error(f"place_order {side} {symbol} qty={qty} idx={position_idx} ro={reduce_only}: {e}")
+            logger.error(f"place_order {side} {symbol} qty={qty}: {e}")
             return None
-
     def close_all_positions(self, symbol):
         try:
             positions=self.fetch_positions_live(symbol)
