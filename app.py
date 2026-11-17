@@ -2,13 +2,13 @@ import logging, os, time
 from functools import wraps
 from flask import Flask, render_template_string, request, jsonify, Response
 from config import BotConfig, TOP_PAIRS
-from exchange_management import 【entity-BybitExchangeManager¦canonical_name=Bybit】
+from exchange_management import BybitExchangeManager
 from trading import MinimalistGridEngine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 app=Flask(__name__)
 cfg=BotConfig()
-ex_manager=【entity-BybitExchangeManager¦canonical_name=Bybit】(cfg)
+ex_manager=BybitExchangeManager(cfg)
 engine=MinimalistGridEngine(ex_manager, cfg)
 engine.start_background_loop()
 
@@ -40,7 +40,6 @@ input,select{width:100%;padding:13px;border-radius:10px;border:1px solid #1e293b
 .btn{width:100%;padding:16px;border:none;border-radius:12px;font-weight:900;font-size:16px;cursor:pointer;margin-top:12px}
 .btn-start{background:#22c55e;color:#000}.btn-stop{background:#ef4444;color:#fff}.btn-blue{background:#0284c7;color:#fff}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;border-bottom:1px solid #1e293b;text-align:center}
-.log{border-left:4px solid #22c55e;background:#0b1220;padding:12px;border-radius:8px;font-size:13px}
 .nav{position:fixed;bottom:0;left:0;right:0;background:#0f172a;border-top:1px solid #1e293b;display:grid;grid-template-columns:repeat(4,1fr);padding:8px 0 18px}
 .nav button{background:none;border:none;color:#94a3b8;font-weight:bold;font-size:12px;cursor:pointer}.nav button.active{color:#22c55e}
 .page{display:none}.page.active{display:block}
@@ -48,43 +47,32 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px;borde
 </style></head><body>
 <div class="top"><h1>ND-SCALPING</h1><small id="sync">Sincronizado: --:--:--</small><br><span id="modeBadge" class="badge">A CARREGAR...</span></div>
 <div class="wrap">
-
-<!-- DASHBOARD -->
 <div id="page-dashboard" class="page active">
 <div class="row"><div class="card"><h3>Inicial (USDT)</h3><div class="big green" id="equity0">--</div></div><div class="card"><h3>Atual (USDT)</h3><div class="big green" id="equity">--</div></div></div>
-<div class="card"><h3>Ligacao a Bybit</h3><span class="badge badge-paper" id="connBadge">PAPEL - SIMULACAO</span> <span class="badge" style="background:#334155" id="runBadge">PARADO</span><p class="muted" id="statusMsg">Carregando...</p></div>
+<div class="card"><h3>Ligacao a Corretora</h3><span class="badge badge-paper" id="connBadge">PAPEL - SIMULACAO</span> <span class="badge" style="background:#334155" id="runBadge">PARADO</span><p class="muted" id="statusMsg">Carregando...</p></div>
 <div class="card" style="margin-top:12px"><h3>Posicao Atual</h3><div id="posBox"><p class="muted">Nenhuma posicao ativa no momento.</p></div><div class="row" style="margin-top:12px"><div><span class="muted">STATUS</span><div class="big green" id="statusTxt">PARADO</div></div><div><span class="muted">PNL REALIZADO</span><div class="big green" id="pnlTxt">+0.0000</div></div></div></div>
-<div class="card" style="margin-top:12px"><h3>Alavancagem & Capital</h3><p>Alavancagem: <b id="levTxt">3x</b></p><p>Cofre Ciclo: <b class="green" id="cofre">0.0000 USDT</b></p><p>Cofre Global: <b class="green" id="cofreG">0.0000 USDT</b></p><p>Ref: <b id="refP">--</b></p><p class="muted">Regras: Trailing 0.25% | Meta 1% | Stop Global 2% | Reancoragem 3% / 1h</p></div>
-<button class="btn btn-start" onclick="controlBot('start')">▶ INICIAR ROBO</button><button class="btn btn-stop" onclick="controlBot('stop')">⏹ PARAR ROBO</button>
+<div class="card" style="margin-top:12px"><h3>Alavancagem e Capital</h3><p>Alavancagem: <b id="levTxt">3x</b></p><p>Cofre Ciclo: <b class="green" id="cofre">0.0000 USDT</b></p><p>Cofre Global: <b class="green" id="cofreG">0.0000 USDT</b></p><p>Ref: <b id="refP">--</b></p><p class="muted">Regras: Trailing 0.25% | Meta 1% | Stop Global 2% | Reancoragem 3% / 1h</p></div>
+<button class="btn btn-start" onclick="controlBot('start')">INICIAR ROBO</button><button class="btn btn-stop" onclick="controlBot('stop')">PARAR ROBO</button>
 </div>
-
-<!-- MERCADO -->
 <div id="page-mercado" class="page"><div class="card"><h3>Mercado - Posicoes Ativas</h3><table><thead><tr><th>ID</th><th>Direcao</th><th>Entrada</th><th>Best</th></tr></thead><tbody id="ordersTable"></tbody></table></div></div>
-
-<!-- HISTORICO -->
-<div id="page-historico" class="page"><div class="card"><h3>Resumo Geral do Historico</h3><p>Total de Operacoes: <b id="histTotal">--</b></p><p>Cofre Global: <b class="green" id="histCofre">--</b></p><p class="muted">O historico detalhado de cada trade fica no log do Render. Aqui vês o resumo do ciclo atual.</p></div><div id="histList"></div></div>
-
-<!-- AJUSTES -->
-<div id="page-ajustes" class="page"><div class="card"><h3>Configuracao & Alavancagem</h3>
+<div id="page-historico" class="page"><div class="card"><h3>Resumo Geral do Historico</h3><p>Total de Operacoes: <b id="histTotal">--</b></p><p>Cofre Global: <b class="green" id="histCofre">--</b></p><p class="muted">O historico detalhado fica no log do Render.</p></div><div id="histList"></div></div>
+<div id="page-ajustes" class="page"><div class="card"><h3>Configuracao</h3>
 <p class="muted">A API e o Secret NAO se colocam aqui. Colocam-se no Render em Environment Variables.</p>
-<label>Ambiente da chave</label><input value="Conta REAL (so leitura de preco em Modo Papel)" disabled>
 <label>Par (Manual)</label><select id="selected_pair">{% for p in pairs %}<option value="{{p}}" {% if p==cfg.selected_pair %}selected{% endif %}>{{p}}</option>{% endfor %}</select>
 <label>Alavancagem Manual</label><input type="number" id="leverage" value="{{cfg.leverage}}" min="1" max="20">
 <label>Margem por operacao (USDT)</label><input type="number" step="0.5" id="margin_per_order" value="{{cfg.margin_per_order}}">
-<p class="muted">E a <b>margem</b>: o valor do teu saldo que entra em cada operacao. A posicao e margem x alavancagem. Ex.: 5 USDT x 3x = 15 USDT.</p>
 <label>Trailing %</label><input type="number" step="0.01" id="trailing_offset_pct" value="{{cfg.trailing_offset_pct*100}}">
 <label>Meta %</label><input type="number" step="0.1" id="target_profit_pct" value="{{cfg.target_profit_pct}}">
 <label>Modo</label><select id="auto_mode"><option value="false" {% if not cfg.auto_mode %}selected{% endif %}>Manual</option><option value="true" {% if cfg.auto_mode %}selected{% endif %}>Automatico</option></select>
 <label>N Operacoes Auto</label><input type="number" id="max_auto_operations" value="{{cfg.max_auto_operations}}" min="1" max="50">
 <button class="btn btn-blue" onclick="saveSettings()">Guardar Definicoes</button></div></div>
-
 </div>
-<div class="nav"><button class="active" onclick="showPage('dashboard',this)">📊<br>Dashboard</button><button onclick="showPage('mercado',this)">📈<br>Mercado</button><button onclick="showPage('historico',this)">📋<br>Historico</button><button onclick="showPage('ajustes',this)">⚙️<br>Ajustes</button></div>
+<div class="nav"><button class="active" onclick="showPage('dashboard',this)">Dashboard</button><button onclick="showPage('mercado',this)">Mercado</button><button onclick="showPage('historico',this)">Historico</button><button onclick="showPage('ajustes',this)">Ajustes</button></div>
 <script>
 function showPage(n,btn){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+n).classList.add('active');document.querySelectorAll('.nav button').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
 async function saveSettings(){const p={selected_pair:document.getElementById('selected_pair').value,leverage:parseInt(document.getElementById('leverage').value),margin_per_order:parseFloat(document.getElementById('margin_per_order').value),trailing_offset_pct:parseFloat(document.getElementById('trailing_offset_pct').value)/100,target_profit_pct:parseFloat(document.getElementById('target_profit_pct').value),auto_mode:document.getElementById('auto_mode').value==='true',max_auto_operations:parseInt(document.getElementById('max_auto_operations').value)};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert('Guardado!')}
 async function controlBot(a){await fetch('/api/'+a,{method:'POST'});updateStatus()}
-async function updateStatus(){const r=await fetch('/api/status');const d=await r.json();const now=new Date();document.getElementById('sync').innerText='Sincronizado: '+now.toLocaleTimeString('pt-PT');document.getElementById('equity').innerText=d.equity.toFixed(4);document.getElementById('equity0').innerText=d.cycle_equity?d.cycle_equity.toFixed(4):d.equity.toFixed(4);document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('runBadge').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+d.net_pnl.toFixed(4);document.getElementById('pnlTxt').className='big '+(d.net_pnl>=0?'green':'red');document.getElementById('cofre').innerText=d.cofre.toFixed(4)+' USDT';document.getElementById('cofreG').innerText=d.cofre_global.toFixed(4)+' USDT';document.getElementById('histCofre').innerText=d.cofre_global.toFixed(4)+' USDT';document.getElementById('histTotal').innerText=d.completed_operations;document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(4):'--';document.getElementById('levTxt').innerText=document.getElementById('leverage').value+'x';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='MODO PAPEL - SIMULACAO, SEM DINHEIRO REAL';b.className='badge badge-paper';document.getElementById('connBadge').innerText='PAPEL - SIMULACAO';}else{b.innerText='MODO REAL - DINHEIRO REAL';b.className='badge badge-real';document.getElementById('connBadge').innerText='CONTA REAL';}document.getElementById('ordersTable').innerHTML=d.orders.map(o=>`<tr><td>${o.id}</td><td class="${o.side==='buy'?'green':'red'}">${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(4)}</td><td>${o.best_price.toFixed(4)}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>Nenhuma posicao</td></tr>';document.getElementById('posBox').innerHTML=d.orders.length?d.orders.map(o=>`<p><b>${o.side==='buy'?'LONG':'SHORT'}</b> | Entrada ${o.entry_price.toFixed(4)} | Best ${o.best_price.toFixed(4)}</p>`).join(''):'<p class=muted>Nenhuma posicao ativa no momento.</p>';document.getElementById('histList').innerHTML=d.orders.map(o=>`<div class=hist-item><b>${o.side==='buy'?'LONG':'SHORT'} ${d.active_symbol||''}</b><br><span class=muted>Entrada ${o.entry_price.toFixed(4)} | ID ${o.id}</span></div>`).join('')||'<p class=muted>Nenhum registo de historico recente.</p>'}
+async function updateStatus(){const r=await fetch('/api/status');const d=await r.json();const now=new Date();document.getElementById('sync').innerText='Sincronizado: '+now.toLocaleTimeString('pt-PT');document.getElementById('equity').innerText=d.equity.toFixed(4);document.getElementById('equity0').innerText=d.cycle_equity?d.cycle_equity.toFixed(4):d.equity.toFixed(4);document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('runBadge').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+d.net_pnl.toFixed(4);document.getElementById('pnlTxt').className='big '+(d.net_pnl>=0?'green':'red');document.getElementById('cofre').innerText=d.cofre.toFixed(4)+' USDT';document.getElementById('cofreG').innerText=d.cofre_global.toFixed(4)+' USDT';document.getElementById('histCofre').innerText=d.cofre_global.toFixed(4)+' USDT';document.getElementById('histTotal').innerText=d.completed_operations;document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(4):'--';document.getElementById('levTxt').innerText=document.getElementById('leverage').value+'x';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='MODO PAPEL - SIMULACAO, SEM DINHEIRO REAL';b.className='badge badge-paper';document.getElementById('connBadge').innerText='PAPEL - SIMULACAO';}else{b.innerText='MODO REAL - DINHEIRO REAL';b.className='badge badge-real';document.getElementById('connBadge').innerText='CONTA REAL';}document.getElementById('ordersTable').innerHTML=d.orders.map(o=>`<tr><td>${o.id}</td><td class="${o.side==='buy'?'green':'red'}">${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(4)}</td><td>${o.best_price.toFixed(4)}</td></tr>`).join('')||'<tr><td colspan=4>Nenhuma posicao</td></tr>';document.getElementById('posBox').innerHTML=d.orders.length?d.orders.map(o=>`<p><b>${o.side==='buy'?'LONG':'SHORT'}</b> | Entrada ${o.entry_price.toFixed(4)} | Best ${o.best_price.toFixed(4)}</p>`).join(''):'<p>Nenhuma posicao ativa no momento.</p>';document.getElementById('histList').innerHTML=d.orders.map(o=>`<div class=hist-item><b>${o.side==='buy'?'LONG':'SHORT'} ${d.active_symbol||''}</b><br>Entrada ${o.entry_price.toFixed(4)} | ID ${o.id}</div>`).join('')||'<p>Nenhum registo de historico recente.</p>'}
 setInterval(updateStatus,2000);updateStatus();
 </script></body></html>
 """
