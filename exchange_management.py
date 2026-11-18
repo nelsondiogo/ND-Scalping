@@ -82,13 +82,7 @@ class BybitExchangeManager:
             return qty
         except Exception as e:
             logger.error(f"calc_qty: {e}")
-            # UNICA CORRECAO DE ARRANQUE: fallback matematico, nunca 0
-            # Ex: margem 5 x alavancagem 3 / preco = qty valida mesmo se o mercado falhar
-            try:
-                raw2 = (margin_usdt * leverage) / price if price > 0 else 0.001
-            except Exception:
-                raw2 = 0.001
-            return round(raw2, 6) if raw2 > 0 else 0.001
+            return 0.0
 
     def place_market_order(self, symbol, side, qty, position_idx, reduce_only=False):
         if qty<=0: return None
