@@ -94,32 +94,25 @@ class MinimalistGridEngine:
     def start_bot(self):
         with self.lock:
             self.cfg.completed_operations=0; self.cfg.is_running=True
-            pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair  # FIX Auto: comeca no par escolhido, nao BTC
+            pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair  # FIX Auto
             self.initialize_cycle(pair)
 
     def switch_pair(self, new_pair):
         with self.lock:
             if not self.cfg.is_running:
                 self.cfg.selected_pair = new_pair
-                return "par_guardado_parado"
+                return 'par_guardado_parado'
             if self.cfg.active_symbol == new_pair:
-                return "ja_esta_nesse_par"
+                return 'ja_esta_nesse_par'
             old = self.cfg.active_symbol
             try: self.cfg.cofre_global += self.cfg.cofre; self.cfg.cofre = 0.0
             except Exception: pass
-            self.close_entire_cycle(old, reason=f"Troca {old} -> {new_pair}")
+            self.close_entire_cycle(old, reason='Troca')
             self.cfg.selected_pair = new_pair
             try: self.cfg.pair_index = TOP_PAIRS.index(new_pair)
             except ValueError: self.cfg.pair_index = 0
             self.initialize_cycle(new_pair)
-            return f"trocado_{old}_para_{new_pair}"
-    def _live_pnl_from_state(self, current_price):
-        total = 0.0
-        for o in (self.orders_state or []):
-            if o.get("status") != "ACTIVE": continue
-            if o.get("side") == "buy": total += (current_price - o["entry_price"]) * float(o.get("qty",0))
-            else: total += (o["entry_price"] - current_price) * float(o.get("qty",0))
-        return total
+            return 'trocado'
     def stop_bot(self, close_all=True):
         with self.lock:
             self.cfg.is_running=False
@@ -238,28 +231,24 @@ class MinimalistGridEngine:
 
     def _monitor_position(self, symbol, slot, current_price):
         side=slot["side"]; entry=slot["entry_price"]
-        # LUCRO RAPIDO: se a perna ja ganhou >= 0.02, fecha logo e mete no Cofre
-        # Antes: so fechava se o preco voltasse 0.12% (trailing). Em tendencia reta, nunca fechava.
         _p = (current_price-entry)*slot["qty"] if side=="buy" else (entry-current_price)*slot["qty"]
         _qp = getattr(self.cfg, "quick_profit_usdt", 0.02)
         if _p >= _qp:
             _cs = "sell" if side=="buy" else "buy"
             _idx = 1 if side=="buy" else 2
-            closed=self.ex.place_market_order(symbol,_cs,slot["qty"],position_idx=_idx,reduce_only=True)
+            closed=self._place(symbol,_cs,slot["qty"],current_price,position_idx=_idx,reduce_only=True)
             if not closed: return
             self.cfg.cofre+=_p
             try:
-                if side=="buy": self.hist_long_pnl+=_p
-                else: self.hist_short_pnl+=_p
+                _nm='LONG' if side=='buy' else 'SHORT'
                 self.history.append({"time":int(time.time()),"side":side,"profit":round(_p,4),"reason":"Lucro Rapido","price":current_price})
             except Exception: pass
-            logger.info(f"{'LONG' if side=='buy' else 'SHORT'} LUCRO RAPIDO +{_p:.4f} | Cofre {self.cfg.cofre:.4f}")
             slot["status"]="CLOSED"
             qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
-            new_o=self.ex.place_market_order(symbol, side, qty, position_idx=_idx)
+            new_o=self._place(symbol, side, qty, current_price, position_idx=_idx)
             if new_o:
                 e=float(new_o.get("average") or new_o.get("price") or current_price)
-                self.orders_state.append({"id":f"{'LONG' if side=='buy' else 'SHORT'}_QR_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                self.orders_state.append({"id":f"QR_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
             self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
             return
         if side=="buy":
