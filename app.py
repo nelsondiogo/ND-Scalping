@@ -48,7 +48,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <div id="page-dashboard" class="page active">
 <div class="card"><h3>Status</h3><div class="big" id="statusTxt">PARADO</div><div class="muted" id="statusMsg">A aguardar...</div><div class="muted">Par: <b id="activePair">BTC/USDT:USDT</b> | Preco atual: <b id="livePrice">--</b> | Ref: <b id="refP">--</b></div></div>
 <div class="row"><div class="card"><h3>Inicial</h3><div class="big green" id="equity0">--</div></div><div class="card"><h3>Atual</h3><div class="big green" id="equity">--</div></div></div>
-<div class="card"><h3>Posicao Atual - AO VIVO</h3><div class="muted">Preco agora: <b id="livePriceTop">--</b> <span id="priceArrow"></span> | Ref: <b id="refTop">--</b></div><div id="liveCards"></div><div id="posBox"><p class="muted">Nenhuma posicao ativa.</p></div><p><b>TOTAL AGORA:</b> <b id="pnlTxt">+0.0000</b> <span id="totalArrow"></span> | Cofre ciclo: <b class="green" id="cofre">0.0000</b> | Cofre global: <b class="green" id="cofreG">0.0000</b></p><p class="muted">LONG ganha quando o preco SOBE. SHORT ganha quando o preco DESCE. Quando um esta verde, o outro esta vermelho - e normal, e o hedge.</p></div>
+<div class="card"><h3>Posicao Atual - AO VIVO</h3><div class="muted">Preco agora: <b id="livePriceTop">--</b> <span id="priceArrow"></span> | Ref: <b id="refTop">--</b></div><div id="liveCards"></div><div id="posBox"><p class="muted">Nenhuma posicao ativa.</p></div><p><b>TOTAL AGORA:</b> <b id="pnlTxt">+0.0000</b> <span id="totalArrow"></span> | Cofre ciclo: <b class="green" id="cofre">0.0000</b> | Cofre global: <b class="green" id="cofreG">0.0000</b></p><p class="muted">LONG ganha quando o preco SOBE. SHORT ganha quando o preco DESCE.</p></div>
 <button class="btn btn-start" onclick="controlBot('start')">INICIAR ROBO</button><button class="btn btn-stop" onclick="controlBot('stop')">PARAR ROBO</button>
 <p class="muted">Em Papel o preco vem publico, sem precisar de API. Em Real, a API tem de estar valida no Render.</p>
 </div>
@@ -71,7 +71,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 function showPage(n,btn){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+n).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
 async function saveSettings(){const p={selected_pair:document.getElementById('selected_pair').value,leverage:parseInt(document.getElementById('leverage').value),margin_per_order:parseFloat(document.getElementById('margin_per_order').value),trailing_offset_pct:parseFloat(document.getElementById('trailing_offset_pct').value)/100,target_profit_pct:parseFloat(document.getElementById('target_profit_pct').value),auto_mode:document.getElementById('auto_mode').value==='true',max_auto_operations:parseInt(document.getElementById('max_auto_operations').value)};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert(r.ok?'Guardado!':'Erro ao guardar');}
 async function controlBot(a){const r=await fetch('/api/'+a,{method:'POST'});const d=await r.json();alert(a==='start'?'A iniciar... aguarda 5s e ve o Dashboard. Se ficar PARADO, le a mensagem de Status.':'Parado.');updateStatus()}
-async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT')+' | '+d.status_message;document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('ordersTable').innerHTML=(d.orders||[]).map(o=>`<tr><td>${o.id}</td><td>${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(2)}</td><td>${o.best_price.toFixed(2)}</td><td>${o.qty}</td></tr>`).join('')||'<tr><td colspan=5>Sem posicoes. Carrega INICIAR.</td></tr>';document.getElementById('livePriceTop').innerText=d.last_price?d.last_price.toFixed(2):'--';document.getElementById('refTop').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('totalArrow').innerText=(d.live_total||0)>=0?'▲ POSITIVO':'▼ NEGATIVO';document.getElementById('totalArrow').style.color=(d.live_total||0)>=0?'#22c55e':'#ef4444';document.getElementById('pnlTxt').innerText=((d.live_total||0)>=0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>=0?'#22c55e':'#ef4444';document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>=0?'#22c55e':'#ef4444';const nome=o.side==='buy'?'LONG':'SHORT';const verbo=o.side==='buy'?(d.price_dir==='up'?'a ganhar porque o preco SOBE':(d.price_dir==='down'?'a perder porque o preco DESCE':'estavel')):(d.price_dir==='down'?'a ganhar porque o preco DESCE':(d.price_dir==='up'?'a perder porque o preco SOBE':'estavel'));return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${o.entry_price.toFixed(2)} Qty ${o.qty}<br><b style="color:${col}">${p>=0?'+':''}${p.toFixed(4)} USDT ${p>=0?'▲ POSITIVO':'▼ NEGATIVO'}</b> - ${verbo}</div>`;}).join('')||'';
+async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT')+' | '+d.status_message;document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('ordersTable').innerHTML=(d.orders||[]).map(o=>`<tr><td>${o.id}</td><td>${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(2)}</td><td>${o.best_price.toFixed(2)}</td><td>${o.qty}</td></tr>`).join('')||'<tr><td colspan=5>Sem posicoes. Carrega INICIAR.</td></tr>';document.getElementById('livePriceTop').innerText=d.last_price?d.last_price.toFixed(2):'--';document.getElementById('refTop').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.live_total||0)>0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>0?'#22c55e':((d.live_total||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const verbo=o.side==='buy'?(d.price_dir==='up'?'a ganhar porque o preco SOBE':(d.price_dir==='down'?'a perder porque o preco DESCE':'estavel')):(d.price_dir==='down'?'a ganhar porque o preco DESCE':(d.price_dir==='up'?'a perder porque o preco SOBE':'estavel'));return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${o.entry_price.toFixed(2)} Qty ${o.qty}<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b> - ${verbo}</div>`;}).join('')||'';
 document.getElementById('posBox').innerHTML=(d.orders||[]).length?(d.orders||[]).map(o=>`<p><b>${o.side==='buy'?'LONG':'SHORT'}</b> Entrada ${o.entry_price.toFixed(2)} Qty ${o.qty}</p>`).join(''):'<p class=muted>Nenhuma posicao ativa.</p>';document.getElementById('histList').innerHTML=(d.history||[]).length?(d.history||[]).map(h=>`<div class=hist-item><b>Ciclo ${h.ciclo} - ${h.par}</b><br>Total: <b>${h.total>=0?'+':''}${h.total} USDT</b> | LONG ${h.long} | SHORT ${h.short}<br>Vencedor: <b>${h.vencedor}</b></div>`).join(''):'<p class=muted>Sem ciclos concluidos.</p>';}catch(e){document.getElementById('sync').innerText='Sem ligacao ao servidor - verifica o Render.';}}
 setInterval(updateStatus,2000);updateStatus();
 </script></body></html>
@@ -107,9 +107,20 @@ def stop(): engine.stop_bot(close_all=True); return jsonify({"status":"stopped"}
 @app.route("/api/status")
 @requires_auth
 def status():
-    # Em Papel, mostra equity simulado e tenta preco publico mesmo parado, para nunca ficar "sem dados"
-    last_price=getattr(engine,"last_price",0) or engine.reference_price or 0
-    if not last_price:
+    # FIX ESTATICO: busca preco FRESCO a cada pedido, nao usa last_price parado
+    _sym = cfg.active_symbol or cfg.selected_pair
+    last_price = 0
+    ticker_err = ""
+    try:
+        _t = ex_manager.fetch_ticker(_sym)
+        last_price = float(_t.get("last",0) or 0)
+        if last_price>0:
+            engine.prev_price = engine.last_price if getattr(engine,"last_price",0)>0 else last_price
+            engine.last_price = last_price
+    except Exception as e:
+        ticker_err = str(e)
+        last_price = getattr(engine,"last_price",0) or engine.reference_price or 0
+    if False:
         try:
             t=ex_manager.fetch_ticker(cfg.selected_pair)
             last_price=float(t.get("last",0) or 0)
@@ -121,19 +132,26 @@ def status():
         equity=ex_manager.get_total_equity()
         if equity<0: equity=0
     net=(equity-cfg.cycle_initial_equity) if (cfg.is_running and cfg.cycle_initial_equity>0) else 0.0
-    live_orders = engine.get_live_positions() if hasattr(engine,"get_live_positions") else engine.orders_state
-    live_total = engine.get_live_total() if hasattr(engine,"get_live_total") else 0.0
+    # PNL vivo com preco fresco
+    live_orders=[]; live_total=0.0
+    for _o in (engine.orders_state or []):
+        if _o.get("status")!="ACTIVE": continue
+        _pnl = ((_o["entry_price"]-last_price) if _o.get("side")=="sell" else (last_price-_o["entry_price"]))*float(_o.get("qty",0))
+        live_total+=_pnl
+        _oo=dict(_o); _oo["pnl_live"]=round(_pnl,4); _oo["price_now"]=last_price; _oo["is_profit"]=_pnl>0
+        live_orders.append(_oo)
+    live_total=round(live_total,4)
     if getattr(cfg,'paper_trading',False):
-        equity = (cfg.cycle_initial_equity or cfg.paper_initial_balance) + cfg.cofre + live_total
-    price_dir = "flat"
+        equity=(cfg.cycle_initial_equity or cfg.paper_initial_balance)+cfg.cofre+live_total
+    price_dir="flat"
     if getattr(engine,"last_price",0) and getattr(engine,"prev_price",0):
-        price_dir = "up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
+        price_dir="up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
     return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,
         "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
         "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
         "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"last_price":last_price,
         "paper_trading":cfg.paper_trading,"paper_equity":engine.paper_equity,"history":getattr(engine,"history",[]),
-        "leverage":cfg.leverage,"margin_per_order":cfg.margin_per_order})
+        "leverage":cfg.leverage,"margin_per_order":cfg.margin_per_order,"ticker_err":ticker_err})
 @app.route("/health")
 def health(): return jsonify({"status":"ok"})
 if __name__=="__main__":
