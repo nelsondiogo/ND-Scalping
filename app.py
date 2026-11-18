@@ -1,4 +1,4 @@
-import logging, os, time
+import logging, os, time, threading
 from functools import wraps
 from flask import Flask, render_template_string, request, jsonify, Response
 from config import BotConfig, TOP_PAIRS
@@ -53,8 +53,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <button id="powerBtn" class="btn btn-start" onclick="togglePower()">INICIAR ROBO</button>
 
 </div>
-<div id="page-mercado" class="page"><div class="card"><h3>Mercado - Moedas do Bot</h3><div class="muted">Preco em tempo real. A moeda em operacao fica em destaque.</div><div id="marketList"><p class="muted">A carregar moedas...</p></div></div></div><div id="page-historico" class="page"><div id="histList"><p class="muted">Sem ciclos concluidos.</p></div></div>
-<div id="page-ajustes" class="page"><div class="card"><h3>Resultados</h3><div class="row"><div class="card"><h3>Inicial</h3><div class="big green" id="ajEquity0">--</div></div><div class="card"><h3>Atual</h3><div class="big green" id="ajEquity">--</div></div></div><div class="muted">Cofre: <b class="green" id="ajCofre">0.0000 USDT</b></div></div><div class="card"><h3>Ajustes - Todos os parametros aqui</h3>
+<div id="page-mercado" class="page"><div class="card"><h3>Mercado - Moedas do Bot</h3><div class="muted">Preco em tempo real. A moeda em operacao fica em destaque.</div><div id="marketList"><p class="muted">A carregar moedas...</p></div></div></div><div id="page-historico" class="page"><div class="card"><h3>Historico por ciclo</h3><p class="muted">Cada ciclo mostra o que ganhou/perdeu no total, quanto veio do LONG, quanto veio do SHORT, e qual lado teve mais performance.</p></div><div id="histList"><p class="muted">Sem ciclos concluidos.</p></div></div>
+<div id="page-ajustes" class="page"><div class="card"><h3>Ajustes - Todos os parametros aqui</h3>
 <p class="muted">A API e o Secret NAO ficam aqui. Ficam no Render em Environment Variables. Aqui mudas o par, alavancagem e margem.</p>
 <label>Par</label><select id="selected_pair">{% for p in pairs %}<option value="{{p}}" {% if p==cfg.selected_pair %}selected{% endif %}>{{p}}</option>{% endfor %}</select>
 <label>Alavancagem (1 a 20)</label><input type="number" id="leverage" value="{{cfg.leverage}}">
@@ -75,10 +75,10 @@ let _running=false;
 async function togglePower(){try{const a=_running?'stop':'start';const r=await fetch('/api/'+a,{method:'POST'});let d={};try{d=await r.json();}catch(e){}alert(!r.ok||d.status==='error'?(d.message||d.error||'Erro - tenta outra vez'):(a==='start'?'A iniciar... aguarda 5s e ve o Dashboard.':'Robo desligado.'));updateStatus();}catch(e){alert('Sem ligacao ao servidor.');}}
 function fmtQ(q){if(q==null)return '--';var s=Number(q).toFixed(8);return s.replace(/\.?0+$/,'')||'0';}
 function fmtP(p){if(!p&&p!==0)return '--';if(p<1)return p.toFixed(4);if(p<10)return p.toFixed(3);return p.toFixed(2);}
-async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT');document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';var _aj0=document.getElementById('ajEquity0');if(_aj0)_aj0.innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';var _aj=document.getElementById('ajEquity');if(_aj)_aj.innerText=(d.equity||0).toFixed(2)+' USDT';var _ajc=document.getElementById('ajCofre');if(_ajc)_ajc.innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';_running=d.is_running;var _pb=document.getElementById('powerBtn');if(_pb){_pb.innerText=d.is_running?'DESLIGAR ROBO':'INICIAR ROBO';_pb.className='btn '+(d.is_running?'btn-stop':'btn-start');}document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('livePriceTop').innerText=d.last_price?fmtP(d.last_price):'--';document.getElementById('refTop').innerText=d.reference_price?fmtP(d.reference_price):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.live_total||0)>0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>0?'#22c55e':((d.live_total||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const tgt=o.target_price||0;const px=d.last_price||0;let falta=0;if(tgt>0&&px>0){falta=o.side==='buy'?(tgt-px)/px*100:(px-tgt)/px*100;if(falta<0)falta=0;}return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${fmtP(o.entry_price)} | Alvo ${fmtP(tgt)} | Falta ${falta.toFixed(2)}%<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b></div>`;}).join('')||'';var _hlist=(d.history||[]);var _orders=_hlist.filter(function(h){return !h.ciclo;});var _tot=_orders.reduce(function(s,h){return s+Number(h.profit||0);},0);var _tl=_orders.filter(function(h){return h.side==='buy';}).reduce(function(s,h){return s+Number(h.profit||0);},0);var _ts=_orders.filter(function(h){return h.side==='sell';}).reduce(function(s,h){return s+Number(h.profit||0);},0);document.getElementById('histList').innerHTML=(_orders.length?_orders.slice().reverse().map(function(h){var _d=h.time?new Date(h.time*1000).toLocaleString('pt-PT'):'';return '<div class=hist-item><b>'+(h.side==='buy'?'LONG':'SHORT')+'</b> '+fmtP(h.entry)+' → '+fmtP(h.close)+' | Lucro: <b style=color:'+(Number(h.profit)>=0?'#22c55e':'#ef4444')+'>'+(Number(h.profit)>=0?'+':'')+Number(h.profit).toFixed(4)+' USDT</b><br><span class=muted>'+_d+' | '+(h.reason||'')+'</span></div>';}).join(''):'<p class=muted>Sem ordens fechadas ainda.</p>');
+async function updateStatus(){try{const r=await fetch('/api/status');if(!r.ok){document.getElementById('sync').innerText='Sem ligacao - a tentar...';return;}const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT');document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';if(_ajc)_ajc.innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';_running=d.is_running;var _pb=document.getElementById('powerBtn');if(_pb){_pb.innerText=d.is_running?'DESLIGAR ROBO':'INICIAR ROBO';_pb.className='btn '+(d.is_running?'btn-stop':'btn-start');}document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('livePriceTop').innerText=d.last_price?fmtP(d.last_price):'--';document.getElementById('refTop').innerText=d.reference_price?fmtP(d.reference_price):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.live_total||0)>0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>0?'#22c55e':((d.live_total||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const tgt=o.target_price||0;const px=d.last_price||0;let falta=0;if(tgt>0&&px>0){falta=o.side==='buy'?(tgt-px)/px*100:(px-tgt)/px*100;if(falta<0)falta=0;}return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${fmtP(o.entry_price)} | Alvo ${fmtP(tgt)} | Falta ${falta.toFixed(2)}%<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b></div>`;}).join('')||'';var _hlist=(d.history||[]);var _orders=_hlist.filter(function(h){return !h.ciclo;});var _tot=_orders.reduce(function(s,h){return s+Number(h.profit||0);},0);var _tl=_orders.filter(function(h){return h.side==='buy';}).reduce(function(s,h){return s+Number(h.profit||0);},0);var _ts=_orders.filter(function(h){return h.side==='sell';}).reduce(function(s,h){return s+Number(h.profit||0);},0);document.getElementById('histList').innerHTML=(_orders.length?_orders.slice().reverse().map(function(h){var _d=h.time?new Date(h.time*1000).toLocaleString('pt-PT'):'';return '<div class=hist-item><b>'+(h.side==='buy'?'LONG':'SHORT')+'</b> '+fmtP(h.entry)+' → '+fmtP(h.close)+' | Lucro: <b style=color:'+(Number(h.profit)>=0?'#22c55e':'#ef4444')+'>'+(Number(h.profit)>=0?'+':'')+Number(h.profit).toFixed(4)+' USDT</b><br><span class=muted>'+_d+' | '+(h.reason||'')+'</span></div>';}).join(''):'<p class=muted>Sem ordens fechadas ainda.</p>');
 try{var _to=document.getElementById('total_orders');if(_to){var _v=parseInt(_to.value)||14;var _h=document.getElementById('splitHint');if(_h)_h.innerText=_v+' = '+Math.floor(_v/2)+' LONG + '+Math.floor(_v/2)+' SHORT';}var _sp=document.getElementById('stepPctHint');var _si=document.getElementById('grid_step_price');if(_sp&&_si&&d.last_price){var _sv=parseFloat(_si.value)||0;_sp.innerText='Passo '+_sv+' = '+(_sv/Number(d.last_price)*100).toFixed(4)+'% do preco atual ('+fmtP(d.last_price)+') | 1a ordem a '+(_sv/2)+' da Ref';}}catch(e){}try{renderGrid(d)}catch(e){console.log('grid',e)}}catch(e){document.getElementById('sync').innerText='Sem ligacao ao servidor - verifica o Render.';}}
 function renderGrid(d){try{var refEl=document.getElementById('refLine');if(refEl){refEl.innerText='— Ref: '+(d.reference_price?Number(d.reference_price).toFixed(4):'--')+' —';}var orders=Array.isArray(d.orders)?d.orders:[];var longs=orders.filter(function(o){return o.side==='buy'}).sort(function(a,b){return a.entry_price-b.entry_price});var shorts=orders.filter(function(o){return o.side==='sell'}).sort(function(a,b){return b.entry_price-a.entry_price});function fmt(o){var tgt=(o.target_price!=null)?Number(o.target_price).toFixed(4):'--';var tp=(o.target_profit!=null)?Number(o.target_profit).toFixed(4):'0.0100';var cls=o.status==='PENDING'?'yellow':(o.status==='ACTIVE'?'green':'red');return '<div class="grid-row"><span>'+String(o.id).replace('GRID_','')+' • '+Number(o.entry_price).toFixed(4)+' → '+tgt+'</span><span class="'+cls+'">'+o.status+' • +'+tp+'</span></div>';}var lc=document.getElementById('longCol');if(lc){lc.innerHTML=longs.length?longs.map(fmt).join(''):'<p class="muted">'+(d.is_running?'Sem ordens LONG.':'Robo parado - prime INICIAR.')+'</p>';}var sc=document.getElementById('shortCol');if(sc){sc.innerHTML=shorts.length?shorts.map(fmt).join(''):'<p class="muted">'+(d.is_running?'Sem ordens SHORT.':'Robo parado - prime INICIAR.')+'</p>';}}catch(e){console.log('grid',e)}}
-async function loadMarket(){try{const r=await fetch('/api/market');const d=await r.json();document.getElementById('marketList').innerHTML=(d.market||[]).map(m=>'<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 10px;border-radius:10px;margin-top:6px;border:1px solid '+(m.active?'#22c55e':'#1e293b')+';background:'+(m.active?'#052e16':'#0b1220')+'"><b>'+m.name+'</b><span>'+(m.price!=null?fmtP(m.price)+' USDT':'--')+(m.active?' <b style="color:#22c55e">● EM OPERAÇÃO</b>':'')+'</span></div>').join('')||'<p class=muted>Sem moedas.</p>';}catch(e){}}
+async function loadMarket(){try{const r=await fetch('/api/market');const d=await r.json();document.getElementById('marketList').innerHTML=(d.market||[]).map(m=>'<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 10px;border-radius:10px;margin-top:6px;border:1px solid '+(m.active?'#22c55e':'#1e293b')+';background:'+(m.active?'#052e16':'#0b1220')+'"><b>'+m.name+'</b><span>'+(m.price!=null?fmtP(m.price)+' USDT':'--')+(m.active?' <b style="color:#22c55e">● EM OPERAÇÃO</b>':'')+'</span></div>').join('')||'<p class=muted>A carregar moedas...</p>';}catch(e){}}
 setInterval(function(){var _mp=document.getElementById('page-mercado');if(_mp&&_mp.classList.contains('active'))loadMarket();},5000);
 setInterval(updateStatus,2000);updateStatus();
 </script></body></html>
@@ -143,71 +143,83 @@ def start():
 def stop():
     try: engine.stop_bot(close_all=True); return jsonify({"status":"stopped"})
     except Exception as e: return jsonify({"status":"error","message":f"Erro a parar: {e}"}),500
-@app.route("/api/market")
-@requires_auth
-def market():
+_market_cache={"ts":0,"data":[]}
+_market_lock=threading.Lock()
+def _refresh_market():
     out=[]
     for p in TOP_PAIRS:
         try:
             _t=ex_manager.fetch_ticker(p); _px=float(_t.get("last",0) or 0)
         except Exception: _px=None
         out.append({"pair":p,"name":p.split("/")[0],"price":_px,"active":(p==cfg.active_symbol)})
-    return jsonify({"market":out,"active":cfg.active_symbol})
+    with _market_lock: _market_cache["ts"]=time.time(); _market_cache["data"]=out
+@app.route("/api/market")
+@requires_auth
+def market():
+    # V9: devolve a cache na hora; a atualização corre em fundo, nunca bloqueia o Dashboard
+    with _market_lock: _ts=_market_cache["ts"]; _data=list(_market_cache["data"])
+    if time.time()-_ts>15:
+        threading.Thread(target=_refresh_market, daemon=True).start()
+    return jsonify({"market":_data,"active":cfg.active_symbol})
 
 @app.route("/api/status")
 @requires_auth
 def status():
-    # V5 WATCHDOG: se o motor esta a correr mas o loop de fundo esta parado ha +5s (Render Free dorme),
-    # o proprio pedido do Dashboard (de 2 em 2s) da o tick. O preco a passar uma entrada REAGE na hora.
     try:
-        if cfg.is_running and (time.time()-getattr(engine,"last_tick_time",0)>5):
-            engine.tick()
-    except Exception as _e: print("watchdog tick", _e)
-    # FIX ESTATICO: busca preco FRESCO a cada pedido, nao usa last_price parado
-    _sym = cfg.active_symbol or cfg.selected_pair
-    last_price = 0
-    ticker_err = ""
-    try:
-        _t = ex_manager.fetch_ticker(_sym)
-        last_price = float(_t.get("last",0) or 0)
-        if last_price>0:
-            engine.prev_price = engine.last_price if getattr(engine,"last_price",0)>0 else last_price
-            engine.last_price = last_price
-    except Exception as e:
-        ticker_err = str(e)
-        last_price = getattr(engine,"last_price",0) or engine.reference_price or 0
-    if False:
+        # V5 WATCHDOG: se o motor esta a correr mas o loop de fundo esta parado ha +5s (Render Free dorme),
+        # o proprio pedido do Dashboard (de 2 em 2s) da o tick. O preco a passar uma entrada REAGE na hora.
         try:
-            t=ex_manager.fetch_ticker(cfg.selected_pair)
-            last_price=float(t.get("last",0) or 0)
-            engine.last_price=last_price
-        except Exception: last_price=0
-    if getattr(cfg,'paper_trading',False):
-        equity=engine.paper_equity if engine.paper_equity>0 else cfg.paper_initial_balance
-    else:
-        equity=ex_manager.get_total_equity()
-        if equity<0: equity=0
-    net=(equity-cfg.cycle_initial_equity) if (cfg.is_running and cfg.cycle_initial_equity>0) else 0.0
-    # PNL vivo com preco fresco
-    live_orders=[]; live_total=0.0
-    for _o in (engine.orders_state or []):
-        if _o.get("status")!="ACTIVE": continue
-        _pnl = ((_o["entry_price"]-last_price) if _o.get("side")=="sell" else (last_price-_o["entry_price"]))*float(_o.get("qty",0))
-        live_total+=_pnl
-        _oo=dict(_o); _oo["pnl_live"]=round(_pnl,4); _oo["price_now"]=last_price; _oo["is_profit"]=_pnl>0
-        live_orders.append(_oo)
-    live_total=round(live_total,4)
-    if getattr(cfg,'paper_trading',False):
-        equity=(cfg.cycle_initial_equity or cfg.paper_initial_balance)+cfg.cofre+live_total
-    price_dir="flat"
-    if getattr(engine,"last_price",0) and getattr(engine,"prev_price",0):
-        price_dir="up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
-    return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,"tick_age":round(time.time()-getattr(engine,"last_tick_time",0),1),
-        "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
-        "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
-        "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"last_price":last_price,
-        "paper_trading":cfg.paper_trading,"paper_equity":engine.paper_equity,"initial_balance":(cfg.paper_initial_balance if cfg.paper_trading else (cfg.cycle_initial_equity or cfg.paper_initial_balance)),"history":getattr(engine,"history",[]),
-        "leverage":cfg.leverage,"total_orders":cfg.total_orders,"per_side":getattr(engine,"per_side",7),"first_dist":getattr(engine,"first_dist",0),"grid_step":getattr(engine,"grid_step",cfg.grid_step_price),"margin_per_order":cfg.margin_per_order,"ticker_err":ticker_err})
+            if cfg.is_running and (time.time()-getattr(engine,"last_tick_time",0)>5):
+                engine.tick()
+        except Exception as _e: print("watchdog tick", _e)
+        # FIX ESTATICO: busca preco FRESCO a cada pedido, nao usa last_price parado
+        _sym = cfg.active_symbol or cfg.selected_pair
+        last_price = 0
+        ticker_err = ""
+        try:
+            _t = ex_manager.fetch_ticker(_sym)
+            last_price = float(_t.get("last",0) or 0)
+            if last_price>0:
+                engine.prev_price = engine.last_price if getattr(engine,"last_price",0)>0 else last_price
+                engine.last_price = last_price
+        except Exception as e:
+            ticker_err = str(e)
+            last_price = getattr(engine,"last_price",0) or engine.reference_price or 0
+        if False:
+            try:
+                t=ex_manager.fetch_ticker(cfg.selected_pair)
+                last_price=float(t.get("last",0) or 0)
+                engine.last_price=last_price
+            except Exception: last_price=0
+        if getattr(cfg,'paper_trading',False):
+            equity=engine.paper_equity if engine.paper_equity>0 else cfg.paper_initial_balance
+        else:
+            equity=ex_manager.get_total_equity()
+            if equity<0: equity=0
+        net=(equity-cfg.cycle_initial_equity) if (cfg.is_running and cfg.cycle_initial_equity>0) else 0.0
+        # PNL vivo com preco fresco
+        live_orders=[]; live_total=0.0
+        for _o in (engine.orders_state or []):
+            if _o.get("status")!="ACTIVE": continue
+            _pnl = ((_o["entry_price"]-last_price) if _o.get("side")=="sell" else (last_price-_o["entry_price"]))*float(_o.get("qty",0))
+            live_total+=_pnl
+            _oo=dict(_o); _oo["pnl_live"]=round(_pnl,4); _oo["price_now"]=last_price; _oo["is_profit"]=_pnl>0
+            live_orders.append(_oo)
+        live_total=round(live_total,4)
+        if getattr(cfg,'paper_trading',False):
+            equity=(cfg.cycle_initial_equity or cfg.paper_initial_balance)+cfg.cofre+live_total
+        price_dir="flat"
+        if getattr(engine,"last_price",0) and getattr(engine,"prev_price",0):
+            price_dir="up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
+        return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,"tick_age":round(time.time()-getattr(engine,"last_tick_time",0),1),
+            "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
+            "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
+            "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"last_price":last_price,
+            "paper_trading":cfg.paper_trading,"paper_equity":engine.paper_equity,"initial_balance":(cfg.paper_initial_balance if cfg.paper_trading else (cfg.cycle_initial_equity or cfg.paper_initial_balance)),"history":getattr(engine,"history",[]),
+            "leverage":cfg.leverage,"total_orders":cfg.total_orders,"per_side":getattr(engine,"per_side",7),"first_dist":getattr(engine,"first_dist",0),"grid_step":getattr(engine,"grid_step",cfg.grid_step_price),"margin_per_order":cfg.margin_per_order,"ticker_err":ticker_err})
+    except Exception as e:
+        return jsonify({"status":"error","message":str(e)}),500
+
 @app.route("/health")
 def health(): return jsonify({"status":"ok"})
 if __name__=="__main__":
