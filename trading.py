@@ -284,12 +284,17 @@ class MinimalistGridEngine:
                 if not o: return
                 slot["status"]="ACTIVE"
                 slot["open_price"]=current_price
+                # CIRURGICO: alvo a partir do preco REAL de abertura (salto de preco nao deixa o alvo abaixo da entrada)
+                _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
+                slot["target_price"]=round(current_price+_stp,8)
                 return
             if slot["side"]=="sell" and current_price <= slot["entry_price"]:
                 o=self._place(symbol,"sell",slot["qty"],current_price,position_idx=2)
                 if not o: return
                 slot["status"]="ACTIVE"
                 slot["open_price"]=current_price
+                _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
+                slot["target_price"]=round(current_price-_stp,8)
                 return
             return
         if slot["status"]!="ACTIVE":
