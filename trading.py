@@ -94,7 +94,13 @@ class MinimalistGridEngine:
                 self.closed_orders=list(_h) if isinstance(_h, list) else []
             self.hist_long_pnl=d.get("hist_long",0)
             self.hist_short_pnl=d.get("hist_short",0)
-            logger.info(f"Estado restaurado Papel={self._is_paper()} {self.cfg.active_symbol} Ref={self.reference_price}")
+            # V9 ARRANQUE LIMPO: o ciclo antigo NUNCA volta a aparecer antes do INICIAR.
+            # Historico (ordens fechadas, cofre_global) mantem-se. O ciclo (Ref, ordens, cofre) descarta-se.
+            self.reference_price=0.0; self.orders_state=[]
+            self.cfg.active_symbol=None; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0
+            self.cfg.is_running=False; self.paper_equity=0.0
+            self.last_ref_touch=time.time(); self.cycle_start_time=0
+            logger.info("V9 arranque limpo - ciclo anterior descartado, prime INICIAR")
         except Exception as e: logger.error(f"load_state: {e}")
 
     def start_background_loop(self):
@@ -143,6 +149,7 @@ class MinimalistGridEngine:
                 self.close_entire_cycle(self.cfg.active_symbol, reason="Paragem Manual")
                 self._fold_cofre_to_principal()
             self.cfg.active_symbol=None
+            self.reference_price=0.0; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0  # V9: PARAR limpa o ciclo
             self.cfg.status_message=f"Parado. Saldo principal atualizado: {self.cfg.paper_initial_balance:.2f} USDT (Papel)" if self._is_paper() else "Parado pelo Utilizador. Cofre somado ao principal."
             self._save_state()
 
