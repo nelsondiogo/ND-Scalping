@@ -45,6 +45,9 @@ class BotConfig:
         self.cofre = 0.0
         self.cofre_global = 0.0
         # GRID - Espacamento entre ordens (Ajustes, volatilidade) | OP 0.65% | SOL 0.40% | BTC 0.15% | ETH 0.25%
-        self.grid_spacing_pct = float(os.getenv("GRID_SPACING_PCT","0.0065"))
+        # GRID V4 - Espacamento em PRECO (absoluto). Ex BTC 20 | ETH 1.5 | SOL 0.15 | OP 0.0015
+        # Antes era em % (0.15% em BTC = passo 94.75, nunca tocava). Agora tu escreves o passo em preco.
+        self.grid_step_price = float(os.getenv("GRID_STEP_PRICE","20.0"))
+        self.grid_spacing_pct = float(os.getenv("GRID_SPACING_PCT","0.0065"))  # mantido por compatibilidade, ja nao e usado
         self.grid_orders_per_side = 5
         self.admin_password = os.getenv("ADMIN_PASSWORD","admin123")
