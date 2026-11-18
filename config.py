@@ -46,7 +46,9 @@ class BotConfig:
         self.cofre_global = 0.0
         # GRID - Espacamento entre ordens (Ajustes, volatilidade) | OP 0.65% | SOL 0.40% | BTC 0.15% | ETH 0.25%
         # GRID V5 - Espacamento em PRECO, LIVRE. Unica regra: nao pode ser 0. Ex BTC 20 | ETH 1.5 | SOL 0.15 | OP 0.0015
-        self.grid_step_price = float(os.getenv("GRID_STEP_PRICE","20.0"))
+        self.grid_step_price = float(os.getenv("GRID_STEP_PRICE","40.0"))  # V6: passo 40 para BTC (primeira ordem a 20 da Ref)
+        self.total_orders = int(float(os.getenv("TOTAL_ORDERS","14")))  # V6: total = 14 -> 7 LONG + 7 SHORT
+        self.paper_fee_rate = 0.0001  # V6: taxa maker simulada no papel
         self.grid_spacing_pct = float(os.getenv("GRID_SPACING_PCT","0.0065"))  # mantido por compatibilidade, ja nao e usado
         self.grid_orders_per_side = 5
         self.admin_password = os.getenv("ADMIN_PASSWORD","admin123")
