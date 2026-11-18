@@ -89,7 +89,7 @@ class MinimalistGridEngine:
             try:
                 if self.cfg.is_running: self.tick()
             except Exception as e: logger.error(f"tick err: {e}")
-            time.sleep(1.0)
+            time.sleep(0.5)  # FIX CIRURGICO: 0.5s para apanhar o recuo logo, nao deixar escapar dentro de 1s
 
     def start_bot(self):
         with self.lock:
@@ -230,66 +230,75 @@ class MinimalistGridEngine:
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
-        # === TRAVA CIRURGICA a 0.01 - NAO PODE RECUAR ===
-        # Porque 0.01 e nao 0.02? Prints do user: SHORT +0.0154, LONG +0.0194, SHORT +0.0097 - todos abaixo de 0.02, por isso nunca fechavam e depois recuavam.
-        # A 0.01 ele agarra TODOS esses. Com Qty grande (963 em OP, 97 em ADA) cada toque pequeno ja da 0.01. Mais oportunidades = mais Cofre.
-        # Em Papel nao ha taxa, por isso 0.01 e lucro puro. Em Real, a taxa de taker come parte - por isso em Real vamos rever se 0.01 ainda compensa.
+        # === TRAILING CIRURGICO - PROMPT INICIAL, CORRETO ===
+        # Para que serve o Trailing nos Ajustes? Era o espaco de recuo permitido.
+        # Bug: Trailing 0.1% em OP = 0.075 USDT de recuo permitido. LONG a +0.04 podia cair 0.075 antes de fechar -> lucro fugia.
+        # Correcao: Trailing dos Ajustes passa a ser IGNORADO aqui. Recuo permitido = ZERO.
+        # Regra exata:
+        #  1. Trava ativa a 0.01 - a partir dai a perna esta ARMADA
+        #  2. Segue o melhor preco - se subir 0.01 -> 0.02 -> 0.04, vai acompanhando, NAO fecha
+        #  3. Recuou 1 tick a partir do melhor, fecha ALI MESMO - tocou 0.04 e recuou, fecha a ~0.04. Nao pode deixar escapar por nada.
+        # Antes errava de 2 formas: Trailing 0.1% deixava recuar 0.075; Trava 0.01/0.02 fechava logo a 0.01 sem deixar subir a 0.04.
         side=slot["side"]; entry=slot["entry_price"]
         _p = (current_price-entry)*slot["qty"] if side=="buy" else (entry-current_price)*slot["qty"]
+        # Atualiza melhor lucro / melhor preco ja vistos
         try: slot["best_profit"] = max(float(slot.get("best_profit", _p)), _p)
         except Exception: slot["best_profit"] = _p
-        _qp = 0.01  # TRAVA A 0.01 - fixo, nao depende de config antiga a 0.02
-        if slot["best_profit"] >= _qp:
-            _cs = "sell" if side=="buy" else "buy"
-            _idx = 1 if side=="buy" else 2
-            closed=self._place(symbol,_cs,slot["qty"],current_price,position_idx=_idx,reduce_only=True)
-            if not closed: return
-            _lock = _p if _p>0 else slot["best_profit"]*0.9
-            self.cfg.cofre+=_lock
-            try:
-                if side=="buy": self.hist_long_pnl+=_lock
-                else: self.hist_short_pnl+=_lock
-                self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trava 0.01","price":current_price,"best":round(slot["best_profit"],4)})
-            except Exception: pass
-            slot["status"]="CLOSED"
-            qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
-            new_o=self._place(symbol, side, qty, current_price, position_idx=_idx)
-            if new_o:
-                e=float(new_o.get("average") or new_o.get("price") or current_price)
-                self.orders_state.append({"id":f"QR_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
-            self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+        # 1. Armou? (atingiu 0.01 alguma vez)
+        if slot["best_profit"] >= 0.01:
+            slot["armed"] = True
+        if not slot.get("armed", False):
+            # Ainda nao atingiu 0.01 - nao faz nada, espera. Nao usa Trailing dos Ajustes.
+            # Atualiza best_price para quando armar ja saber o ponto de partida
+            if side=="buy":
+                if current_price>slot["best_price"]: slot["best_price"]=current_price
+            else:
+                if current_price<slot["best_price"]: slot["best_price"]=current_price
             return
+        # 2. Armada - segue o melhor preco
         if side=="buy":
-            if current_price>slot["best_price"]: slot["best_price"]=current_price
-            in_profit=current_price>entry
-            drawdown=(slot["best_price"]-current_price)/slot["best_price"] if slot["best_price"]>0 else 0
-            if in_profit and drawdown>=self.cfg.trailing_offset_pct:
+            if current_price>slot["best_price"]:
+                slot["best_price"]=current_price
+                return  # subiu - segue, NAO fecha
+            # 3. Recuou 1 tick a partir do melhor -> fecha ALI MESMO
+            if current_price < slot["best_price"]:
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
                 if not closed: return
-                profit=(current_price-entry)*slot["qty"]
-                self.cfg.cofre+=profit
+                _lock = _p if _p>0 else 0.0
+                self.cfg.cofre+=_lock
+                try:
+                    self.hist_long_pnl+=_lock
+                    self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trailing Cirurgico 0.01","price":current_price,"best":round(slot["best_profit"],4)})
+                except Exception: pass
                 slot["status"]="CLOSED"
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"buy",qty,current_price,position_idx=1)
                 if new_o:
                     e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"LONG_REV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
-        elif side=="sell":
-            if current_price<slot["best_price"]: slot["best_price"]=current_price
-            in_profit=current_price<entry
-            bounce=(current_price-slot["best_price"])/slot["best_price"] if slot["best_price"]>0 else 0
-            if in_profit and bounce>=self.cfg.trailing_offset_pct:
+                    self.orders_state.append({"id":f"LONG_TC_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0,"armed":False})
+                self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+                return
+        else:  # sell / SHORT
+            if current_price<slot["best_price"]:
+                slot["best_price"]=current_price
+                return  # desceu - segue, NAO fecha
+            if current_price > slot["best_price"]:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
                 if not closed: return
-                profit=(entry-current_price)*slot["qty"]
-                self.cfg.cofre+=profit
+                _lock = _p if _p>0 else 0.0
+                self.cfg.cofre+=_lock
+                try:
+                    self.hist_short_pnl+=_lock
+                    self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trailing Cirurgico 0.01","price":current_price,"best":round(slot["best_profit"],4)})
+                except Exception: pass
                 slot["status"]="CLOSED"
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"sell",qty,current_price,position_idx=2)
                 if new_o:
                     e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"SHORT_REV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
-        self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+                    self.orders_state.append({"id":f"SHORT_TC_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0,"armed":False})
+                self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+                return
 
     def _check_convergence(self, symbol, current_price):
         act=[o for o in self.orders_state if o["status"]=="ACTIVE"]
