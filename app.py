@@ -1,4 +1,4 @@
-import logging, os
+import logging, os, time
 from functools import wraps
 from flask import Flask, render_template_string, request, jsonify, Response
 from config import BotConfig, TOP_PAIRS
@@ -58,9 +58,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <div id="page-ajustes" class="page"><div class="card"><h3>Ajustes - Todos os parametros aqui</h3>
 <p class="muted">A API e o Secret NAO ficam aqui. Ficam no Render em Environment Variables. Aqui mudas o par, alavancagem e margem.</p>
 <label>Par</label><select id="selected_pair">{% for p in pairs %}<option value="{{p}}" {% if p==cfg.selected_pair %}selected{% endif %}>{{p}}</option>{% endfor %}</select>
-<label>Alavancagem (1 a 20)</label><input type="number" id="leverage" value="{{cfg.leverage}}" min="1" max="20">
+<label>Alavancagem (1 a 20)</label><input type="number" id="leverage" value="{{cfg.leverage}}">
 <label>Margem por ordem USDT</label><input type="number" step="0.5" id="margin_per_order" value="{{cfg.margin_per_order}}">
-<label>Espaçamento Grid (em preço)</label><input type="number" step="any" id="grid_step_price" value="{{ cfg.grid_step_price if cfg.grid_step_price is defined else 20 }}"><p class="muted">Escreve o passo em preço: BTC 20 | ETH 1.5 | SOL 0.15 | OP 0.0015. Ex BTC: 64500.5 → 64520 → 64540. Ex OP: 0.7515 → 0.7530 → 0.7545.</p>
+<label>Espaçamento Grid (em preço) - LIVRE, só não pode ser 0</label><input type="number" step="any" id="grid_step_price" value="{{ cfg.grid_step_price if cfg.grid_step_price is defined else 20 }}"><p class="muted">Escreve o passo em preço: BTC 20 | ETH 1.5 | SOL 0.15 | OP 0.0015. Ex BTC: 64500.5 → 64520 → 64540. Ex OP: 0.7515 → 0.7530 → 0.7545.</p>
 <label>Trailing %</label><input type="number" step="0.01" id="trailing_offset_pct" value="{{cfg.trailing_offset_pct*100}}">
 <label>Meta % (lucro para fechar ciclo)</label><input type="number" step="0.1" id="target_profit_pct" value="{{cfg.target_profit_pct}}">
 <label>Modo</label><select id="auto_mode"><option value="false" {% if not cfg.auto_mode %}selected{% endif %}>Manual</option><option value="true" {% if cfg.auto_mode %}selected{% endif %}>Automatico</option></select>
@@ -73,9 +73,10 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 function showPage(n,btn){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+n).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
 async function saveSettings(){const p={selected_pair:document.getElementById('selected_pair').value,leverage:parseInt(document.getElementById('leverage').value),margin_per_order:parseFloat(document.getElementById('margin_per_order').value),grid_step_price:parseFloat(document.getElementById('grid_step_price').value),trailing_offset_pct:parseFloat(document.getElementById('trailing_offset_pct').value)/100,target_profit_pct:parseFloat(document.getElementById('target_profit_pct').value),auto_mode:document.getElementById('auto_mode').value==='true',max_auto_operations:parseInt(document.getElementById('max_auto_operations').value)};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert(r.ok?'Guardado!':'Erro ao guardar');}
 async function controlBot(a){const r=await fetch('/api/'+a,{method:'POST'});const d=await r.json();alert(a==='start'?'A iniciar... aguarda 5s e ve o Dashboard. Se ficar PARADO, le a mensagem de Status.':'Parado.');updateStatus()}
+function fmtQ(q){if(q==null)return '--';var s=Number(q).toFixed(8);return s.replace(/\.?0+$/,'')||'0';}
 function fmtP(p){if(!p&&p!==0)return '--';if(p<1)return p.toFixed(4);if(p<10)return p.toFixed(3);return p.toFixed(2);}
-async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT')+' | '+d.status_message;document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('ordersTable').innerHTML=(d.orders||[]).map(o=>`<tr><td>${o.id}</td><td>${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(2)}</td><td>${o.best_price.toFixed(2)}</td><td>${o.qty<1?Number(o.qty).toFixed(6):Number(o.qty).toFixed(2)}</td></tr>`).join('')||'<tr><td colspan=5>Sem posicoes. Carrega INICIAR.</td></tr>';document.getElementById('livePriceTop').innerText=d.last_price?fmtP(d.last_price):'--';document.getElementById('refTop').innerText=d.reference_price?fmtP(d.reference_price):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.live_total||0)>0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>0?'#22c55e':((d.live_total||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const verbo=o.side==='buy'?(d.price_dir==='up'?'a ganhar porque o preco SOBE':(d.price_dir==='down'?'a perder porque o preco DESCE':'estavel')):(d.price_dir==='down'?'a ganhar porque o preco DESCE':(d.price_dir==='up'?'a perder porque o preco SOBE':'estavel'));return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${fmtP(o.entry_price)} Qty ${o.qty}<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b> - ${verbo}</div>`;}).join('')||'';
-document.getElementById('posBox').innerHTML=(d.orders||[]).length?(d.orders||[]).map(o=>`<p><b>${o.side==='buy'?'LONG':'SHORT'}</b> Entrada ${fmtP(o.entry_price)} Qty ${o.qty}</p>`).join(''):'<p class=muted>Nenhuma posicao ativa.</p>';document.getElementById('histList').innerHTML=(d.history||[]).length?(d.history||[]).map(h=>`<div class=hist-item><b>Ciclo ${h.ciclo} - ${h.par}</b><br>Total: <b>${h.total>=0?'+':''}${h.total} USDT</b> | LONG ${h.long} | SHORT ${h.short}<br>Vencedor: <b>${h.vencedor}</b></div>`).join(''):'<p class=muted>Sem ciclos concluidos.</p>';try{renderGrid(d)}catch(e){console.log('grid',e)}}catch(e){document.getElementById('sync').innerText='Sem ligacao ao servidor - verifica o Render.';}}
+async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT')+' | '+d.status_message;document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('ordersTable').innerHTML=(d.orders||[]).map(o=>`<tr><td>${o.id}</td><td>${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(2)}</td><td>${o.best_price.toFixed(2)}</td><td>${fmtQ(o.qty)}</td></tr>`).join('')||'<tr><td colspan=5>Sem posicoes. Carrega INICIAR.</td></tr>';document.getElementById('livePriceTop').innerText=d.last_price?fmtP(d.last_price):'--';document.getElementById('refTop').innerText=d.reference_price?fmtP(d.reference_price):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.live_total||0)>0?'+':'')+(d.live_total||0).toFixed(4)+' USDT';document.getElementById('pnlTxt').style.color=(d.live_total||0)>0?'#22c55e':((d.live_total||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const verbo=o.side==='buy'?(d.price_dir==='up'?'a ganhar porque o preco SOBE':(d.price_dir==='down'?'a perder porque o preco DESCE':'estavel')):(d.price_dir==='down'?'a ganhar porque o preco DESCE':(d.price_dir==='up'?'a perder porque o preco SOBE':'estavel'));return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${fmtP(o.entry_price)} Qty ${fmtQ(o.qty)}<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b> - ${verbo}</div>`;}).join('')||'';
+document.getElementById('posBox').innerHTML=(d.orders||[]).length?(d.orders||[]).map(o=>`<p><b>${o.side==='buy'?'LONG':'SHORT'}</b> Entrada ${fmtP(o.entry_price)} Qty ${fmtQ(o.qty)}</p>`).join(''):'<p class=muted>Nenhuma posicao ativa.</p>';document.getElementById('histList').innerHTML=(d.history||[]).length?(d.history||[]).map(h=>`<div class=hist-item><b>Ciclo ${h.ciclo} - ${h.par}</b><br>Total: <b>${h.total>=0?'+':''}${h.total} USDT</b> | LONG ${h.long} | SHORT ${h.short}<br>Vencedor: <b>${h.vencedor}</b></div>`).join(''):'<p class=muted>Sem ciclos concluidos.</p>';try{renderGrid(d)}catch(e){console.log('grid',e)}}catch(e){document.getElementById('sync').innerText='Sem ligacao ao servidor - verifica o Render.';}}
 function renderGrid(d){try{var refEl=document.getElementById('refLine');if(refEl){refEl.innerText='— Ref: '+(d.reference_price?Number(d.reference_price).toFixed(4):'--')+' —';}var orders=Array.isArray(d.orders)?d.orders:[];var longs=orders.filter(function(o){return o.side==='buy'}).sort(function(a,b){return a.entry_price-b.entry_price});var shorts=orders.filter(function(o){return o.side==='sell'}).sort(function(a,b){return b.entry_price-a.entry_price});function fmt(o){var tgt=(o.target_price!=null)?Number(o.target_price).toFixed(4):'--';var tp=(o.target_profit!=null)?Number(o.target_profit).toFixed(4):'0.0100';var cls=o.status==='PENDING'?'yellow':(o.status==='ACTIVE'?'green':'red');return '<div class="grid-row"><span>'+String(o.id).replace('GRID_','')+' • '+Number(o.entry_price).toFixed(4)+' → '+tgt+'</span><span class="'+cls+'">'+o.status+' • +'+tp+'</span></div>';}var lc=document.getElementById('longCol');if(lc){lc.innerHTML=longs.length?longs.map(fmt).join(''):'<p class="muted">Sem LONG — já fecharam, Cofre subiu.</p>';}var sc=document.getElementById('shortCol');if(sc){sc.innerHTML=shorts.length?shorts.map(fmt).join(''):'<p class="muted">Sem SHORT — já fecharam, Cofre subiu.</p>';}}catch(e){console.log('grid',e)}}
 setInterval(updateStatus,2000);updateStatus();
 </script></body></html>
@@ -86,6 +87,7 @@ def index(): return render_template_string(HTML, cfg=cfg, pairs=TOP_PAIRS)
 @app.route("/api/settings", methods=["POST"])
 @requires_auth
 def update_settings():
+    # V5 - Ajustes LIVRES para quem esta a operar. Sem barreiras. Unica regra: espacamento != 0.
     try:
         d=request.json or {}
         if "selected_pair" in d and d["selected_pair"] in TOP_PAIRS:
@@ -94,18 +96,25 @@ def update_settings():
                 try: engine.switch_pair(_np)
                 except Exception as _e: print("switch err", _e)
         if "leverage" in d:
-            v=int(d["leverage"]); assert 1<=v<=20; cfg.leverage=v
+            try: cfg.leverage=int(d["leverage"])
+            except Exception: pass
         if "margin_per_order" in d:
-            v=float(d["margin_per_order"]); assert 0.5<=v<=1000; cfg.margin_per_order=v
+            try: cfg.margin_per_order=float(d["margin_per_order"])
+            except Exception: pass
         if "grid_step_price" in d:
-            v=float(d["grid_step_price"]); assert v>0 and v<100000, "Espacamento tem de ser > 0"; cfg.grid_step_price=v
+            v=float(d["grid_step_price"])
+            if v==0: return jsonify({"status":"error","error":"Espacamento nao pode ser 0"}),400
+            cfg.grid_step_price=abs(v)
         if "trailing_offset_pct" in d:
-            v=float(d["trailing_offset_pct"]); assert 0.001<=v<=0.05; cfg.trailing_offset_pct=v
+            try: cfg.trailing_offset_pct=float(d["trailing_offset_pct"])
+            except Exception: pass
         if "target_profit_pct" in d:
-            v=float(d["target_profit_pct"]); assert 0.1<=v<=20; cfg.target_profit_pct=v
+            try: cfg.target_profit_pct=float(d["target_profit_pct"])
+            except Exception: pass
         if "auto_mode" in d: cfg.auto_mode=bool(d["auto_mode"])
         if "max_auto_operations" in d:
-            v=int(d["max_auto_operations"]); assert 1<=v<=50; cfg.max_auto_operations=v
+            try: cfg.max_auto_operations=int(d["max_auto_operations"])
+            except Exception: pass
         return jsonify({"status":"ok"})
     except Exception as e: return jsonify({"status":"error","error":str(e)}),400
 @app.route("/api/switch_pair", methods=["POST"])
@@ -128,6 +137,12 @@ def stop(): engine.stop_bot(close_all=True); return jsonify({"status":"stopped"}
 @app.route("/api/status")
 @requires_auth
 def status():
+    # V5 WATCHDOG: se o motor esta a correr mas o loop de fundo esta parado ha +5s (Render Free dorme),
+    # o proprio pedido do Dashboard (de 2 em 2s) da o tick. O preco a passar uma entrada REAGE na hora.
+    try:
+        if cfg.is_running and (time.time()-getattr(engine,"last_tick_time",0)>5):
+            engine.tick()
+    except Exception as _e: print("watchdog tick", _e)
     # FIX ESTATICO: busca preco FRESCO a cada pedido, nao usa last_price parado
     _sym = cfg.active_symbol or cfg.selected_pair
     last_price = 0
@@ -167,7 +182,7 @@ def status():
     price_dir="flat"
     if getattr(engine,"last_price",0) and getattr(engine,"prev_price",0):
         price_dir="up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
-    return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,
+    return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,"tick_age":round(time.time()-getattr(engine,"last_tick_time",0),1),
         "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
         "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
         "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"last_price":last_price,
