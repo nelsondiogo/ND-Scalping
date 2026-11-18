@@ -175,6 +175,7 @@ class MinimalistGridEngine:
         _step = float(getattr(self.cfg, "grid_step_price", 20.0))
         if _step==0: _step = 20.0
         if _step<0: _step = abs(_step)
+        _profit_per = round(_step * qty_per, 6)
         # V6 - Ref = preco no INICIAR. NADA abre na Ref. Tudo PENDING.
         # Primeira distancia = passo/2 (ex passo 40 -> 20). LONG 1 = Ref+20, alvo +40. SHORT 1 = Ref-20, alvo -40.
         # Total dos Ajustes: total 14 = 7 LONG + 7 SHORT. LONG i = Ref + primeira + passo*(i-1). SHORT i = Ref - primeira - passo*(i-1).
