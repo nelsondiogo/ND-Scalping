@@ -18,7 +18,6 @@ class MinimalistGridEngine:
         self.history=[]
         self.last_price=0.0
         self.last_tick_time=0.0  # V5: watchdog - ultimo tick do motor
-        self._last_rebuild=0  # V8: throttle do auto-reparo da grelha
         self.closed_orders=[]  # V6: historico = ordens FECHADAS, cada uma com o seu lucro
         self.per_side=7  # V6: total 14 = 7 LONG + 7 SHORT (Ajustes)
         self.grid_step=20.0
@@ -81,11 +80,12 @@ class MinimalistGridEngine:
             if bool(d.get("paper",False)) != self._is_paper():
                 logger.info("Mudança de modo Papel/Real - estado antigo ignorado")
                 return
-            self.reference_price=d.get("ref",0.0); self.orders_state=d.get("orders",[])
-            self.cfg.active_symbol=d.get("active"); self.cfg.cycle_initial_equity=d.get("equity0",0)
-            self.cfg.cofre=d.get("cofre",0); self.cfg.cofre_global=d.get("cofre_global",0)
-            self.last_ref_touch=d.get("last_touch",time.time()); self.cycle_start_time=d.get("cycle_start",time.time())
-            self.paper_equity=d.get("paper_equity",0)
+            # V6 FINAL: o ciclo antigo NAO volta. So o historico e o cofre_global voltam.
+            self.reference_price=0.0; self.orders_state=[]
+            self.cfg.active_symbol=None; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0
+            self.cfg.cofre_global=d.get("cofre_global",0)
+            self.last_ref_touch=time.time(); self.cycle_start_time=0
+            self.paper_equity=0.0
             _h=d.get("history",[])
             # estado antigo (resumos de ciclo) nao e lista de ordens -> ignora
             if isinstance(_h, list) and _h and isinstance(_h[0], dict) and "ciclo" in _h[0]:
@@ -94,13 +94,7 @@ class MinimalistGridEngine:
                 self.closed_orders=list(_h) if isinstance(_h, list) else []
             self.hist_long_pnl=d.get("hist_long",0)
             self.hist_short_pnl=d.get("hist_short",0)
-            # V9 ARRANQUE LIMPO: o ciclo antigo NUNCA volta a aparecer antes do INICIAR.
-            # Historico (ordens fechadas, cofre_global) mantem-se. O ciclo (Ref, ordens, cofre) descarta-se.
-            self.reference_price=0.0; self.orders_state=[]
-            self.cfg.active_symbol=None; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0
-            self.cfg.is_running=False; self.paper_equity=0.0
-            self.last_ref_touch=time.time(); self.cycle_start_time=0
-            logger.info("V9 arranque limpo - ciclo anterior descartado, prime INICIAR")
+            logger.info("V6 FINAL arranque limpo - historico mantido, ciclo descartado")
         except Exception as e: logger.error(f"load_state: {e}")
 
     def start_background_loop(self):
@@ -117,14 +111,7 @@ class MinimalistGridEngine:
         with self.lock:
             self.cfg.completed_operations=0; self.cfg.is_running=True
             pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair  # FIX Auto
-            try:
-                self.initialize_cycle(pair)
-            except Exception as e:
-                # V8: falhou a meio (ex: calculate_qty sem rede) -> NAO deixa OPERANDO falso
-                self.cfg.is_running=False; self.cfg.active_symbol=None
-                self.cfg.status_message=f"Erro a iniciar: {e}. Prime INICIAR outra vez."
-                try: self._save_state()
-                except Exception: pass
+            self.initialize_cycle(pair)
 
     def switch_pair(self, new_pair):
         with self.lock:
@@ -149,7 +136,7 @@ class MinimalistGridEngine:
                 self.close_entire_cycle(self.cfg.active_symbol, reason="Paragem Manual")
                 self._fold_cofre_to_principal()
             self.cfg.active_symbol=None
-            self.reference_price=0.0; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0  # V9: PARAR limpa o ciclo
+            self.reference_price=0.0; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0
             self.cfg.status_message=f"Parado. Saldo principal atualizado: {self.cfg.paper_initial_balance:.2f} USDT (Papel)" if self._is_paper() else "Parado pelo Utilizador. Cofre somado ao principal."
             self._save_state()
 
@@ -183,11 +170,7 @@ class MinimalistGridEngine:
         self.reference_price=float(ticker["last"])
         self.last_price=self.reference_price
         self.orders_state=[]; self.last_ref_touch=time.time(); self.cycle_start_time=time.time()
-        try:
-            qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
-        except Exception:
-            time.sleep(1.5)  # V8: 2a tentativa - falha transitória da rede
-            qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
+        qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
         if qty_total<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
         # V5 - Passo ABSOLUTO em preco, livre, so nao pode ser 0. Ex BTC 20 | OP 0.0015.
@@ -219,20 +202,6 @@ class MinimalistGridEngine:
         with self.lock:
             self.last_tick_time=time.time()  # V5: marca cada tick, o Dashboard vigia
             if not self.cfg.is_running or not self.cfg.active_symbol: return
-            # V8 AUTO-REPARO: grelha vazia com robo a correr = arranque falhou a meio -> reconstruir, sem perder o Cofre
-            if not self.orders_state:
-                if time.time()-getattr(self, "_last_rebuild", 0) < 5: return
-                self._last_rebuild=time.time()
-                _cofre=self.cfg.cofre; _eq0=self.cfg.cycle_initial_equity
-                try: self.initialize_cycle(self.cfg.active_symbol)
-                except Exception as e:
-                    self.cfg.is_running=False; self.cfg.active_symbol=None
-                    self.cfg.status_message=f"Erro a reconstruir grelha: {e}. Prime INICIAR outra vez."
-                    try: self._save_state()
-                    except Exception: pass
-                    return
-                self.cfg.cofre=_cofre; self.cfg.cycle_initial_equity=_eq0
-                if not self.cfg.is_running: return
             symbol=self.cfg.active_symbol
             try: ticker=self.ex.fetch_ticker(symbol)
             except Exception: return
