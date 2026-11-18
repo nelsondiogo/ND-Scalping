@@ -89,7 +89,7 @@ class MinimalistGridEngine:
             try:
                 if self.cfg.is_running: self.tick()
             except Exception as e: logger.error(f"tick err: {e}")
-            time.sleep(0.5)  # GRID V3: 0.5s
+            time.sleep(0.5)  # GRID V4: 0.5s
 
     def start_bot(self):
         with self.lock:
@@ -122,7 +122,7 @@ class MinimalistGridEngine:
             self._save_state()
 
     def initialize_cycle(self, symbol):
-        # === ND GRID V3 CORRETO - Ref no centro, LONG acima, SHORT abaixo ===
+        # === ND GRID V4 CORRETO - Ref no centro, LONG acima, SHORT abaixo ===
         # ERRO DO GRID V1: as 10 ordens abriam TODAS na Ref (0.0774). Dashboard mostrava 10x a mesma entrada.
         # CORRETO: ordens PENDENTES nos niveis. Nao abrem na Ref. Esperam o preco chegar.
         # Ref no centro. Ex OP Ref 0.0774, passo 0.0005 (da ~0.01 de lucro com Qty 19.37):
@@ -154,12 +154,16 @@ class MinimalistGridEngine:
         qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
         if qty_total<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
-        qty_per = round(qty_total/10.0, 2)  # FIX Qty feio: 19.369999... -> 19.37
-        if qty_per<=0: qty_per = round(qty_total/10.0, 4)
-        # GRID V3 - Passo = Ref * espacamento dos Ajustes. Ex OP Ref 0.0773 * 0.65% = 0.0005
-        _spacing = float(getattr(self.cfg, "grid_spacing_pct", 0.0065))
-        _step = self.reference_price * _spacing
-        _profit_per = round(_step * qty_per, 4)
+        # Qty: NAO arredondar para 2 casas - em BTC qty_total/10 = 0.0000237, round(...,2) dava 0.00 e matava a ordem.
+        qty_per = qty_total/10.0
+        if qty_per<=0:
+            self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
+        # GRID V4 - Passo ABSOLUTO em preco, definido em Ajustes. Ex BTC 20 | OP 0.0015.
+        # Antes: passo = Ref * % -> BTC 0.15% = 94.75, nunca tocava. Agora: tu escreves 20, o BTC toca em minutos.
+        # BTC: Ref 63167, passo 20 -> LONG 1 63187, LONG 2 63207... OP: Ref 0.7515, passo 0.0015 -> 0.7530, 0.7545...
+        _step = float(getattr(self.cfg, "grid_step_price", 20.0))
+        if _step<=0: _step = 20.0
+        _profit_per = round(_step * qty_per, 6)
         for i in range(1,6):
             # LONG i: entrada ACIMA da Ref, alvo = entrada + passo (lucro +0.01)
             entry_long = self.reference_price + _step*i
@@ -170,7 +174,7 @@ class MinimalistGridEngine:
             tgt_short = entry_short - _step
             self.orders_state.append({"id":f"GRID_SHORT_{i}","side":"sell","position_idx":2,"entry_price":round(entry_short,8),"best_price":round(entry_short,8),"qty":qty_per,"status":"PENDING","target_price":round(tgt_short,8),"target_profit":_profit_per,"grid_level":i,"grid_step":round(_step,8)})
         mode="[PAPEL] " if self._is_paper() else "[REAL] "
-        self.cfg.status_message=f"{mode}GRID V3 {symbol} | Ref centro: {self.reference_price:.4f} | Espacamento: {_spacing*100:.2f}% Passo: {_step:.4f} | Qty/ordem: {qty_per:.2f}"
+        self.cfg.status_message=f"{mode}GRID V4 {symbol} | Ref centro: {self.reference_price:.4f} | Passo: {_step:.4f} | Qty/ordem: {qty_per:.6f}"
         self._save_state()
 
     def tick(self):
@@ -197,7 +201,7 @@ class MinimalistGridEngine:
                 if net<=-maxloss:
                     logger.info(f"STOP GLOBAL {net:.2f}")
                     self.close_entire_cycle(symbol, reason="Stop Global"); self.cfg.is_running=False; self.cfg.active_symbol=None; self._save_state(); return
-            # GRID V3: sem reanchor, sem convergencia. So GRID.
+            # GRID V4: sem reanchor, sem convergencia. So GRID.
             for slot in list(self.orders_state):
                 if slot["status"] in ("PENDING","ACTIVE"): self._monitor_position(symbol, slot, current_price)
             _rest=[o for o in self.orders_state if o["status"] in ("PENDING","ACTIVE")]
@@ -208,7 +212,7 @@ class MinimalistGridEngine:
             self._save_state()
 
     def _should_reanchor(self, current_price):
-        return False  # GRID V3: reancoragem DESLIGADA - Ref fixa
+        return False  # GRID V4: reancoragem DESLIGADA - Ref fixa
         if self.reference_price<=0: return False
         dist=abs(current_price-self.reference_price)/self.reference_price
         if dist>=self.cfg.reanchor_distance_pct: return True
@@ -245,7 +249,7 @@ class MinimalistGridEngine:
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
-        # === GRID V3 MONITOR - PENDING -> ACTIVE -> CLOSED ===
+        # === GRID V4 MONITOR - PENDING -> ACTIVE -> CLOSED ===
         # PENDING: espera o preco tocar na entrada. LONG: preco >= entrada -> abre (ACTIVE). SHORT: preco <= entrada -> abre.
         # ACTIVE: espera o preco tocar no alvo. LONG: preco >= alvo -> fecha +0.01 Cofre. SHORT: preco <= alvo -> fecha +0.01.
         # Exemplo: Ref 0.0774, LONG 1 entrada 0.0779. Preco sobe 0.0774 -> 0.0779: LONG 1 abre. Preco sobe 0.0779 -> 0.0784: LONG 1 fecha +0.01.
@@ -279,7 +283,7 @@ class MinimalistGridEngine:
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_long_pnl+=_profit
-                    self.history.append({"time":int(time.time()),"side":"buy","profit":round(_profit,4),"reason":f"GRID V3 LONG {_lvl}","price":current_price,"target":_tgt})
+                    self.history.append({"time":int(time.time()),"side":"buy","profit":round(_profit,4),"reason":f"GRID V4 LONG {_lvl}","price":current_price,"target":_tgt})
                 except Exception: pass
                 slot["status"]="CLOSED"
                 self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
@@ -293,7 +297,7 @@ class MinimalistGridEngine:
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_short_pnl+=_profit
-                    self.history.append({"time":int(time.time()),"side":"sell","profit":round(_profit,4),"reason":f"GRID V3 SHORT {_lvl}","price":current_price,"target":_tgt})
+                    self.history.append({"time":int(time.time()),"side":"sell","profit":round(_profit,4),"reason":f"GRID V4 SHORT {_lvl}","price":current_price,"target":_tgt})
                 except Exception: pass
                 slot["status"]="CLOSED"
                 self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
