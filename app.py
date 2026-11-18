@@ -37,7 +37,7 @@ label{display:block;font-size:.85em;color:#94a3b8}input,select{width:100%;paddin
 table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #334155;text-align:center}
 .badge{background:#0f172a;padding:6px 10px;border-radius:6px;display:inline-block;margin:2px}
 </style></head><body><div class="container">
-<h1>ND-Scalping V3 | <span id='modeBadge' style='background:#eab308;color:#000;padding:4px 10px;border-radius:6px;font-size:.6em'>A CARREGAR...</span></h1><p style='color:#94a3b8'>Ref + Trailing + Reancoragem + Cofre + Modo Papel</p>
+<h1>ND-Scalping V2 | Ref + Trailing + Reancoragem + Cofre</h1>
 <div class="card"><div class="grid-stats">
 <div class="stat-box"><div>Equity</div><div class="stat-val" id="equity">--</div></div>
 <div class="stat-box"><div>Lucro Ciclo</div><div class="stat-val" id="pnl">--</div></div>
@@ -62,7 +62,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px so
 async function saveSettings(){const p={selected_pair:document.getElementById('selected_pair').value,leverage:parseInt(document.getElementById('leverage').value),margin_per_order:parseFloat(document.getElementById('margin_per_order').value),trailing_offset_pct:parseFloat(document.getElementById('trailing_offset_pct').value)/100,target_profit_pct:parseFloat(document.getElementById('target_profit_pct').value),auto_mode:document.getElementById('auto_mode').value==='true',max_auto_operations:parseInt(document.getElementById('max_auto_operations').value)};await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert('Guardado!')}
 async function controlBot(a){await fetch('/api/'+a,{method:'POST'});updateStatus()}
 async function updateStatus(){const r=await fetch('/api/status');const d=await r.json();document.getElementById('equity').innerText=d.equity.toFixed(2)+' USDT';const pnl=document.getElementById('pnl');pnl.innerText=(d.net_pnl>=0?'+':'')+d.net_pnl.toFixed(4);pnl.className='stat-val '+(d.net_pnl>=0?'green':'red');document.getElementById('activePair').innerText=d.active_symbol||'NENHUM';document.getElementById('cofre').innerText=d.cofre.toFixed(4)+' USDT';document.getElementById('cofreG').innerText=d.cofre_global.toFixed(4)+' USDT';document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(4):'--';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('ordersTable').innerHTML=d.orders.map(o=>`<tr><td>${o.id}</td><td class="${o.side==='buy'?'green':'red'}">${o.side==='buy'?'LONG':'SHORT'}</td><td>${o.entry_price.toFixed(4)}</td><td>${o.best_price.toFixed(4)}</td></tr>`).join('')}
-async function updateMode(){const r=await fetch('/api/status');const d=await r.json();const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='MODO PAPEL - SIMULAÇÃO, SEM DINHEIRO REAL';b.style.background='#22c55e';}else{b.innerText='MODO REAL - DINHEIRO REAL';b.style.background='#ef4444';b.style.color='#fff';}};setInterval(updateStatus,2000);updateStatus();updateMode();setInterval(updateMode,5000);
+setInterval(updateStatus,2000);updateStatus();
 </script></body></html>
 """
 
@@ -99,17 +99,13 @@ def stop(): engine.stop_bot(close_all=True); return jsonify({"status":"stopped"}
 @app.route("/api/status")
 @requires_auth
 def status():
-    # Em papel, mostra equity simulado, nao o real
-    if getattr(cfg,'paper_trading',False):
-        equity=engine.paper_equity if engine.paper_equity>0 else cfg.paper_initial_balance
-    else:
-        equity=ex_manager.get_total_equity()
-        if equity<0: equity=0
+    equity=ex_manager.get_total_equity()
+    if equity<0: equity=0
     net=(equity-cfg.cycle_initial_equity) if (cfg.is_running and cfg.cycle_initial_equity>0) else 0.0
     return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"equity":equity,
         "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
         "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
-        "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"paper_trading":cfg.paper_trading,"paper_equity":engine.paper_equity})
+        "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price})
 @app.route("/health")
 def health(): return jsonify({"status":"ok"})
 
