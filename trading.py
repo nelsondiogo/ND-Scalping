@@ -18,6 +18,7 @@ class MinimalistGridEngine:
         self.history=[]
         self.last_price=0.0
         self.last_tick_time=0.0  # V5: watchdog - ultimo tick do motor
+        self._last_rebuild=0  # V8: throttle do auto-reparo da grelha
         self.closed_orders=[]  # V6: historico = ordens FECHADAS, cada uma com o seu lucro
         self.per_side=7  # V6: total 14 = 7 LONG + 7 SHORT (Ajustes)
         self.grid_step=20.0
@@ -110,7 +111,14 @@ class MinimalistGridEngine:
         with self.lock:
             self.cfg.completed_operations=0; self.cfg.is_running=True
             pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair  # FIX Auto
-            self.initialize_cycle(pair)
+            try:
+                self.initialize_cycle(pair)
+            except Exception as e:
+                # V8: falhou a meio (ex: calculate_qty sem rede) -> NAO deixa OPERANDO falso
+                self.cfg.is_running=False; self.cfg.active_symbol=None
+                self.cfg.status_message=f"Erro a iniciar: {e}. Prime INICIAR outra vez."
+                try: self._save_state()
+                except Exception: pass
 
     def switch_pair(self, new_pair):
         with self.lock:
@@ -168,14 +176,17 @@ class MinimalistGridEngine:
         self.reference_price=float(ticker["last"])
         self.last_price=self.reference_price
         self.orders_state=[]; self.last_ref_touch=time.time(); self.cycle_start_time=time.time()
-        qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
+        try:
+            qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
+        except Exception:
+            time.sleep(1.5)  # V8: 2a tentativa - falha transitória da rede
+            qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
         if qty_total<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
         # V5 - Passo ABSOLUTO em preco, livre, so nao pode ser 0. Ex BTC 20 | OP 0.0015.
         _step = float(getattr(self.cfg, "grid_step_price", 20.0))
         if _step==0: _step = 20.0
         if _step<0: _step = abs(_step)
-        _profit_per = round(_step * qty_per, 6)
         # V6 - Ref = preco no INICIAR. NADA abre na Ref. Tudo PENDING.
         # Primeira distancia = passo/2 (ex passo 40 -> 20). LONG 1 = Ref+20, alvo +40. SHORT 1 = Ref-20, alvo -40.
         # Total dos Ajustes: total 14 = 7 LONG + 7 SHORT. LONG i = Ref + primeira + passo*(i-1). SHORT i = Ref - primeira - passo*(i-1).
@@ -201,6 +212,20 @@ class MinimalistGridEngine:
         with self.lock:
             self.last_tick_time=time.time()  # V5: marca cada tick, o Dashboard vigia
             if not self.cfg.is_running or not self.cfg.active_symbol: return
+            # V8 AUTO-REPARO: grelha vazia com robo a correr = arranque falhou a meio -> reconstruir, sem perder o Cofre
+            if not self.orders_state:
+                if time.time()-getattr(self, "_last_rebuild", 0) < 5: return
+                self._last_rebuild=time.time()
+                _cofre=self.cfg.cofre; _eq0=self.cfg.cycle_initial_equity
+                try: self.initialize_cycle(self.cfg.active_symbol)
+                except Exception as e:
+                    self.cfg.is_running=False; self.cfg.active_symbol=None
+                    self.cfg.status_message=f"Erro a reconstruir grelha: {e}. Prime INICIAR outra vez."
+                    try: self._save_state()
+                    except Exception: pass
+                    return
+                self.cfg.cofre=_cofre; self.cfg.cycle_initial_equity=_eq0
+                if not self.cfg.is_running: return
             symbol=self.cfg.active_symbol
             try: ticker=self.ex.fetch_ticker(symbol)
             except Exception: return
