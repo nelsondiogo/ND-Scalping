@@ -230,27 +230,40 @@ class MinimalistGridEngine:
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
+        # === TRAVA CIRURGICA - NAO PODE RECUAR ===
+        # Regra: assim que a perna TOCAR no alvo, fica travada. Mesmo que o preco recue no segundo a seguir, fecha na mesma.
+        # Antes: so fechava se no tick exacto o lucro estivesse > alvo. Se subia a +0.0482 e recuava para +0.01 antes do tick, perdia a oportunidade.
+        # Agora: guarda best_profit (o melhor lucro que a perna JA atingiu). Se best_profit >= alvo, fecha JÁ, ao preco atual.
         side=slot["side"]; entry=slot["entry_price"]
         _p = (current_price-entry)*slot["qty"] if side=="buy" else (entry-current_price)*slot["qty"]
+        # Atualiza o melhor lucro ja visto - isto e a trava
+        try: slot["best_profit"] = max(float(slot.get("best_profit", _p)), _p)
+        except Exception: slot["best_profit"] = _p
         _qp = getattr(self.cfg, "quick_profit_usdt", 0.02)
-        if _p >= _qp:
+        # Se JA tocou no alvo alguma vez, fecha agora - nao espera, nao deixa recuar
+        if slot["best_profit"] >= _qp:
             _cs = "sell" if side=="buy" else "buy"
             _idx = 1 if side=="buy" else 2
             closed=self._place(symbol,_cs,slot["qty"],current_price,position_idx=_idx,reduce_only=True)
             if not closed: return
-            self.cfg.cofre+=_p
+            # Fecha ao preco atual (pode ser um pouco menos que o pico, mas nunca deixa voltar a zero/negativo)
+            # Lucro travado = lucro atual (ja esta acima de 0 porque best >= 0.02 e o preco nao caiu tanto num tick)
+            _lock = _p if _p>0 else slot["best_profit"]*0.9
+            self.cfg.cofre+=_lock
             try:
-                _nm='LONG' if side=='buy' else 'SHORT'
-                self.history.append({"time":int(time.time()),"side":side,"profit":round(_p,4),"reason":"Lucro Rapido","price":current_price})
+                if side=="buy": self.hist_long_pnl+=_lock
+                else: self.hist_short_pnl+=_lock
+                self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trava Cirurgica","price":current_price,"best":round(slot["best_profit"],4)})
             except Exception: pass
             slot["status"]="CLOSED"
             qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
             new_o=self._place(symbol, side, qty, current_price, position_idx=_idx)
             if new_o:
                 e=float(new_o.get("average") or new_o.get("price") or current_price)
-                self.orders_state.append({"id":f"QR_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                self.orders_state.append({"id":f"QR_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
             self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
             return
+        # Se ainda nao tocou no alvo, atualiza best_price p/ trailing normal (fallback)
         if side=="buy":
             if current_price>slot["best_price"]: slot["best_price"]=current_price
             in_profit=current_price>entry
@@ -260,14 +273,12 @@ class MinimalistGridEngine:
                 if not closed: return
                 profit=(current_price-entry)*slot["qty"]
                 self.cfg.cofre+=profit
-                self.hist_long_pnl+=profit
-                logger.info(f"LONG fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f} {'[PAPEL]' if self._is_paper() else ''}")
                 slot["status"]="CLOSED"
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"buy",qty,current_price,position_idx=1)
                 if new_o:
                     e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"LONG_REV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                    self.orders_state.append({"id":f"LONG_REV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
         elif side=="sell":
             if current_price<slot["best_price"]: slot["best_price"]=current_price
             in_profit=current_price<entry
@@ -277,14 +288,12 @@ class MinimalistGridEngine:
                 if not closed: return
                 profit=(entry-current_price)*slot["qty"]
                 self.cfg.cofre+=profit
-                self.hist_short_pnl+=profit
-                logger.info(f"SHORT fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f} {'[PAPEL]' if self._is_paper() else ''}")
                 slot["status"]="CLOSED"
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"sell",qty,current_price,position_idx=2)
                 if new_o:
                     e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"SHORT_REV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                    self.orders_state.append({"id":f"SHORT_REV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0})
         self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
 
     def _check_convergence(self, symbol, current_price):
