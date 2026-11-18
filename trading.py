@@ -156,7 +156,7 @@ class MinimalistGridEngine:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
         qty_per = round(qty_total/10.0, 2)  # FIX Qty feio: 19.369999... -> 19.37
         if qty_per<=0: qty_per = round(qty_total/10.0, 4)
-        # GRID V3 - Passo = Ref * espacamento dos Ajustes (volatilidade). Ex OP Ref 0.0773 * 0.65% = 0.0005
+        # GRID V3 - Passo = Ref * espacamento dos Ajustes. Ex OP Ref 0.0773 * 0.65% = 0.0005
         _spacing = float(getattr(self.cfg, "grid_spacing_pct", 0.0065))
         _step = self.reference_price * _spacing
         _profit_per = round(_step * qty_per, 4)
