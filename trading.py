@@ -7,78 +7,64 @@ class MinimalistGridEngine:
     def __init__(self, exchange_manager, config):
         self.ex=exchange_manager; self.cfg=config
         self.reference_price=0.0
-        self.orders_state=[]
+        self.orders_state=[]  # [{id,side,position_idx,entry_price,best_price,qty,status}]
         self.lock=threading.Lock()
         self._thread=None
         self.last_ref_touch=time.time()
         self.cycle_start_time=0
+        self.last_price=0.0
+        self.prev_price=0.0
         self.paper_equity=0.0
         self.hist_long_pnl=0.0
         self.hist_short_pnl=0.0
         self.history=[]
-        self.last_price=0.0
         self._load_state()
 
-    # ---------- helpers PAPER ----------
+
+    # ---------- PAPER + PNL VIVO ----------
     def _is_paper(self): return bool(getattr(self.cfg,"paper_trading",False))
     def _paper_place(self, symbol, side, qty, price, position_idx):
-        """Simula uma ordem - NÃO toca na Bybit"""
-        fake={"id":f"PAPER_{int(time.time()*1000)}","average":price,"price":price,"side":side,"amount":qty}
-        logger.info(f"[PAPEL] Ordem simulada {side} {symbol} qty={qty} @ {price} idx={position_idx}")
-        return fake
+        return {"id":f"PAPER_{int(time.time()*1000)}","average":price,"price":price,"side":side,"amount":qty}
     def _place(self, symbol, side, qty, price, position_idx, reduce_only=False):
         if self._is_paper():
             return self._paper_place(symbol, side, qty, price, position_idx)
         return self.ex.place_market_order(symbol, side, qty, position_idx, reduce_only=reduce_only)
-    def _close_all_paper(self):
-        self.orders_state=[]
-        return True
-    def _paper_equity(self, current_price):
-        """Equity simulado = Equity0 + Cofre + PnL flutuante das posições abertas"""
-        if self.cfg.cycle_initial_equity<=0: return self.cfg.paper_initial_balance
-        pnl=0.0
+    def live_pnl_for(self, o, current_price):
+        if current_price<=0: return 0.0
+        if o.get("side")=="buy": return (current_price - o["entry_price"])*o["qty"]
+        return (o["entry_price"] - current_price)*o["qty"]
+    def get_live_positions(self):
+        cp = self.last_price or self.reference_price or 0.0
+        out=[]
         for o in self.orders_state:
-            if o["status"]!="ACTIVE": continue
-            if o["side"]=="buy": pnl += (current_price - o["entry_price"])*o["qty"]
-            else: pnl += (o["entry_price"] - current_price)*o["qty"]
-        return self.cfg.cycle_initial_equity + self.cfg.cofre + pnl
-    def _live_positions_pnl(self, symbol, current_price):
-        if self._is_paper():
-            pnl=0.0
-            for o in self.orders_state:
-                if o["status"]!="ACTIVE": continue
-                if o["side"]=="buy": pnl += (current_price - o["entry_price"])*o["qty"]
-                else: pnl += (o["entry_price"] - current_price)*o["qty"]
-            return pnl
-        live=self.ex.fetch_positions_live(symbol)
-        return sum(p["unrealizedPnl"] for p in live)
+            if o.get("status")!="ACTIVE": continue
+            pnl = self.live_pnl_for(o, cp)
+            out.append({**o, "pnl_live": round(pnl,4), "price_now": cp, "is_profit": pnl>=0})
+        return out
+    def get_live_total(self):
+        cp = self.last_price or self.reference_price or 0.0
+        return round(sum(self.live_pnl_for(o, cp) for o in self.orders_state if o.get("status")=="ACTIVE"),4)
 
     # ---------- persistencia ----------
     def _save_state(self):
         try:
-            data={"ref":self.reference_price,"orders":self.orders_state,"active":self.cfg.active_symbol,
-                  "equity0":self.cfg.cycle_initial_equity,"cofre":self.cfg.cofre,"cofre_global":self.cfg.cofre_global,
-                  "last_touch":self.last_ref_touch,"cycle_start":self.cycle_start_time,"is_running":self.cfg.is_running,
-                  "paper":self._is_paper(),"paper_equity":self.paper_equity,"history":self.history,"hist_long":self.hist_long_pnl,"hist_short":self.hist_short_pnl}
+            data={"ref":self.reference_price,"orders":self.orders_state,
+                  "active":self.cfg.active_symbol,"equity0":self.cfg.cycle_initial_equity,
+                  "cofre":self.cfg.cofre,"cofre_global":self.cfg.cofre_global,
+                  "last_touch":self.last_ref_touch,"cycle_start":self.cycle_start_time,
+                  "is_running":self.cfg.is_running,"paper_equity":self.paper_equity,"history":self.history,"hist_long":self.hist_long_pnl,"hist_short":self.hist_short_pnl,"last_price":self.last_price}
             with open(STATE_FILE,"w") as f: json.dump(data,f)
         except Exception as e: logger.error(f"save_state: {e}")
     def _load_state(self):
         if not os.path.exists(STATE_FILE): return
         try:
             with open(STATE_FILE) as f: d=json.load(f)
-            # Se mudou de modo (papel <-> real), NÃO restaura estado antigo - evita confusão
-            if bool(d.get("paper",False)) != self._is_paper():
-                logger.info("Mudança de modo Papel/Real - estado antigo ignorado")
-                return
             self.reference_price=d.get("ref",0.0); self.orders_state=d.get("orders",[])
             self.cfg.active_symbol=d.get("active"); self.cfg.cycle_initial_equity=d.get("equity0",0)
             self.cfg.cofre=d.get("cofre",0); self.cfg.cofre_global=d.get("cofre_global",0)
             self.last_ref_touch=d.get("last_touch",time.time()); self.cycle_start_time=d.get("cycle_start",time.time())
-            self.paper_equity=d.get("paper_equity",0)
-            self.history=d.get("history",[])
-            self.hist_long_pnl=d.get("hist_long",0)
-            self.hist_short_pnl=d.get("hist_short",0)
-            logger.info(f"Estado restaurado Papel={self._is_paper()} {self.cfg.active_symbol} Ref={self.reference_price}")
+            self.history=d.get("history",[]); self.hist_long_pnl=d.get("hist_long",0); self.hist_short_pnl=d.get("hist_short",0); self.paper_equity=d.get("paper_equity",0); self.last_price=d.get("last_price",0)
+            logger.info(f"Estado restaurado: {self.cfg.active_symbol} Ref={self.reference_price}")
         except Exception as e: logger.error(f"load_state: {e}")
 
     def start_background_loop(self):
@@ -89,7 +75,7 @@ class MinimalistGridEngine:
             try:
                 if self.cfg.is_running: self.tick()
             except Exception as e: logger.error(f"tick err: {e}")
-            time.sleep(1.0)
+            time.sleep(1.0)  # 1s, nao 0.5s - evita rate limit
 
     def start_bot(self):
         with self.lock:
@@ -106,12 +92,8 @@ class MinimalistGridEngine:
             self._save_state()
 
     def initialize_cycle(self, symbol):
-        # Equity inicial: papel usa saldo simulado, real usa Bybit
         if self._is_paper():
-            equity=self.cfg.paper_initial_balance if self.cfg.cycle_initial_equity<=0 else self.cfg.cycle_initial_equity
-            # Em papel, se já havia ciclo anterior, mantém o paper_equity acumulado
-            if self.paper_equity>0: equity=self.paper_equity
-            logger.info(f"[PAPEL] Ciclo simulado - Equity inicial simulado {equity}")
+            equity=self.paper_equity if self.paper_equity>0 else self.cfg.paper_initial_balance
         else:
             equity=self.ex.get_total_equity()
             if equity<0:
@@ -119,29 +101,30 @@ class MinimalistGridEngine:
         required=self.cfg.margin_per_order*2
         if equity < required*1.5:
             self.cfg.is_running=False; self.cfg.status_message=f"Saldo insuficiente ({equity:.2f})"; return
-        self.cfg.active_symbol=symbol; self.cfg.cycle_initial_equity=equity; self.cfg.cofre=0.0
-        if not self._is_paper():
-            self.ex.set_hedge_mode_and_leverage(symbol, self.cfg.leverage)
+        self.cfg.active_symbol=symbol; self.cfg.cycle_initial_equity=equity
+        self.cfg.cofre=0.0
+        self.ex.set_hedge_mode_and_leverage(symbol, self.cfg.leverage)
         try: ticker=self.ex.fetch_ticker(symbol)
         except Exception as e:
             self.cfg.is_running=False; self.cfg.status_message=f"Erro ticker: {e}"; return
         self.reference_price=float(ticker["last"])
-        self.last_price=self.reference_price
+        self.last_price=self.reference_price; self.prev_price=self.reference_price
         self.orders_state=[]; self.last_ref_touch=time.time(); self.cycle_start_time=time.time()
         qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
         if qty<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
+        # LONG
         o_long=self._place(symbol,"buy",qty,self.reference_price,position_idx=1)
         if o_long:
             entry=float(o_long.get("average") or o_long.get("price") or self.reference_price)
             self.orders_state.append({"id":"LONG_BASE","side":"buy","position_idx":1,"entry_price":entry,"best_price":entry,"qty":qty,"status":"ACTIVE"})
+        # SHORT
         o_short=self._place(symbol,"sell",qty,self.reference_price,position_idx=2)
         if o_short:
             entry=float(o_short.get("average") or o_short.get("price") or self.reference_price)
             self.orders_state.append({"id":"SHORT_BASE","side":"sell","position_idx":2,"entry_price":entry,"best_price":entry,"qty":qty,"status":"ACTIVE"})
-        mode="[PAPEL] " if self._is_paper() else "[REAL] "
-        self.cfg.status_message=f"{mode}Operando {symbol} | Ref: {self.reference_price:.4f} | Cofre: 0"
-        logger.info(f"{mode}Ciclo {symbol} Ref={self.reference_price} Equity0={equity}")
+        self.cfg.status_message=f"[PAPEL] Operando {symbol} | Ref: {self.reference_price:.4f} | Cofre: 0" if self._is_paper() else f"Operando {symbol} | Ref: {self.reference_price:.4f} | Cofre: 0"
+        logger.info(f"Ciclo {symbol} Ref={self.reference_price} Equity0={equity}")
         self._save_state()
 
     def tick(self):
@@ -149,12 +132,16 @@ class MinimalistGridEngine:
             if not self.cfg.is_running or not self.cfg.active_symbol: return
             symbol=self.cfg.active_symbol
             try: ticker=self.ex.fetch_ticker(symbol)
-            except Exception: return
+            except Exception as e:
+                logger.warning(f"tick ticker falhou: {e}")
+                return
             current_price=float(ticker["last"])
-            # Equity: papel = simulado, real = Bybit
+            # PRECO VIVO: atualiza sempre, mesmo que o equity falhe a seguir
+            self.prev_price=self.last_price if self.last_price>0 else current_price
+            self.last_price=current_price
+            # 2A META / STOP GLOBAL - em Papel usa saldo virtual + PnL vivo + Cofre
             if self._is_paper():
-                equity=self._paper_equity(current_price)
-                self.paper_equity=equity
+                equity=(self.cfg.cycle_initial_equity or self.cfg.paper_initial_balance) + self.cfg.cofre + sum(self.live_pnl_for(o, current_price) for o in self.orders_state if o.get("status")=="ACTIVE")
             else:
                 equity=self.ex.get_total_equity()
                 if equity<0: return
@@ -163,15 +150,18 @@ class MinimalistGridEngine:
                 target=self.cfg.cycle_initial_equity*(self.cfg.target_profit_pct/100)
                 maxloss=self.cfg.cycle_initial_equity*(self.cfg.max_loss_pct/100)
                 if net>=target:
-                    logger.info(f"META atingida +{net:.2f} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
+                    logger.info(f"META atingida +{net:.2f}")
                     self.close_entire_cycle(symbol, reason="Meta Atingida"); self._handle_post_cycle_transition(); return
                 if net<=-maxloss:
-                    logger.info(f"STOP GLOBAL {net:.2f}")
+                    logger.info(f"STOP GLOBAL -{net:.2f}")
                     self.close_entire_cycle(symbol, reason="Stop Global"); self.cfg.is_running=False; self.cfg.active_symbol=None; self._save_state(); return
+            # 2C VERIFICA REANCORAGEM ANTES DO TRAILING (prioridade)
             if self._should_reanchor(current_price):
                 self._do_reanchor(symbol, current_price); return
+            # 2B TRAILING + 2C TOQUE REF
             for slot in list(self.orders_state):
                 if slot["status"]=="ACTIVE": self._monitor_position(symbol, slot, current_price)
+            # Toque na Ref -> Convergencia
             if abs(current_price-self.reference_price)/self.reference_price <= self.cfg.ref_tolerance_pct:
                 self.last_ref_touch=time.time()
                 self._check_convergence(symbol, current_price)
@@ -186,31 +176,35 @@ class MinimalistGridEngine:
         return False
 
     def _do_reanchor(self, symbol, current_price):
-        logger.info(f"REANCORAGEM {symbol} {self.reference_price} -> {current_price} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
-        pnl_conj=self._live_positions_pnl(symbol, current_price)
-        if self._is_paper():
-            self._close_all_paper()
-        else:
-            self.ex.close_all_positions(symbol)
+        logger.info(f"REANCORAGEM {symbol} Ref antiga {self.reference_price} -> nova {current_price}")
+        # 1. Calcula PnL conjunto antes de fechar (via Bybit)
+        live=self.ex.fetch_positions_live(symbol)
+        pnl_conj=sum(p["unrealizedPnl"] for p in live)
+        # 2. Fecha tudo
+        self.ex.close_all_positions(symbol)
+        # 3. Atualiza cofre global: cofre ciclo + pnl conjunto - taxas estimadas
         notional=self.cfg.margin_per_order*self.cfg.leverage*2
         taxas_est=notional*self.cfg.fee_rate*2
         resultado=self.cfg.cofre + pnl_conj - taxas_est
         self.cfg.cofre_global+=resultado
-        logger.info(f"Reancoragem: cofre {self.cfg.cofre:.2f} + pnl {pnl_conj:.2f} - taxas {taxas_est:.2f} = {resultado:.2f} | Global {self.cfg.cofre_global:.2f}")
-        self.reference_price=current_price; self.cfg.cofre=0.0
+        logger.info(f"Reancoragem resultado: cofre {self.cfg.cofre:.2f} + pnl {pnl_conj:.2f} - taxas {taxas_est:.2f} = {resultado:.2f} | CofreGlobal {self.cfg.cofre_global:.2f}")
+        # 4. Nova Ref
+        self.reference_price=current_price
+        self.cfg.cofre=0.0
         self.last_ref_touch=time.time(); self.cycle_start_time=time.time()
         self.orders_state=[]
+        # 5. Abre novo par na nova Ref
         qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
         if qty>0:
-            o1=self._place(symbol,"buy",qty,current_price,position_idx=1)
+            o1=self.ex.place_market_order(symbol,"buy",qty,position_idx=1)
             if o1:
                 e=float(o1.get("average") or o1.get("price") or current_price)
                 self.orders_state.append({"id":f"LONG_REANCH_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
-            o2=self._place(symbol,"sell",qty,current_price,position_idx=2)
+            o2=self.ex.place_market_order(symbol,"sell",qty,position_idx=2)
             if o2:
                 e=float(o2.get("average") or o2.get("price") or current_price)
                 self.orders_state.append({"id":f"SHORT_REANCH_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
-        self.cfg.status_message=f"{'[PAPEL] ' if self._is_paper() else ''}Reancorado {symbol} | Nova Ref: {current_price:.4f} | CofreGlobal: {self.cfg.cofre_global:.2f}"
+        self.cfg.status_message=f"Reancorado {symbol} | Nova Ref: {current_price:.4f} | CofreGlobal: {self.cfg.cofre_global:.2f}"
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
@@ -220,13 +214,14 @@ class MinimalistGridEngine:
             in_profit=current_price>entry
             drawdown=(slot["best_price"]-current_price)/slot["best_price"] if slot["best_price"]>0 else 0
             if in_profit and drawdown>=self.cfg.trailing_offset_pct:
+                # Fecha LONG
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
-                if not closed: return
+                if not closed: return  # Bybit rejeitou, nao marca como fechado
                 profit=(current_price-entry)*slot["qty"]
-                self.cfg.cofre+=profit
-                self.hist_long_pnl+=profit
-                logger.info(f"LONG fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f} {'[PAPEL]' if self._is_paper() else ''}")
+                self.cfg.cofre+=profit; self.hist_long_pnl+=profit
+                logger.info(f"LONG fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f}")
                 slot["status"]="CLOSED"
+                # Repoem LONG novo (mesma direcao, para manter 1+1)
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"buy",qty,current_price,position_idx=1)
                 if new_o:
@@ -240,9 +235,8 @@ class MinimalistGridEngine:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
                 if not closed: return
                 profit=(entry-current_price)*slot["qty"]
-                self.cfg.cofre+=profit
-                self.hist_short_pnl+=profit
-                logger.info(f"SHORT fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f} {'[PAPEL]' if self._is_paper() else ''}")
+                self.cfg.cofre+=profit; self.hist_short_pnl+=profit
+                logger.info(f"SHORT fechou +{profit:.4f} | Cofre {self.cfg.cofre:.2f}")
                 slot["status"]="CLOSED"
                 qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
                 new_o=self._place(symbol,"sell",qty,current_price,position_idx=2)
@@ -252,49 +246,47 @@ class MinimalistGridEngine:
         self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
 
     def _check_convergence(self, symbol, current_price):
+        # So fecha se houver 1 LONG + 1 SHORT ativos
         act=[o for o in self.orders_state if o["status"]=="ACTIVE"]
         if len(act)<2: return
-        pnl_conj=self._live_positions_pnl(symbol, current_price)
+        live=self.ex.fetch_positions_live(symbol)
+        pnl_conj=sum(p["unrealizedPnl"] for p in live)
         notional=self.cfg.margin_per_order*self.cfg.leverage*2
         taxas_est=notional*self.cfg.fee_rate*2
         net_conj=pnl_conj-taxas_est
         logger.info(f"Toque Ref {current_price} PnLconj {pnl_conj:.4f} net {net_conj:.4f} Cofre {self.cfg.cofre:.4f}")
+        # REGRA DO COFRE: so fecha se conjunto > 0
         if net_conj>0:
-            if self._is_paper(): self._close_all_paper()
-            else:
-                ok=self.ex.close_all_positions(symbol)
-                if not ok: return
+            # Fecha ambas
+            ok=self.ex.close_all_positions(symbol)
+            if not ok: return
             self.cfg.cofre+=net_conj
             logger.info(f"CONVERGENCIA fechou +{net_conj:.4f} | Cofre {self.cfg.cofre:.4f}")
             self.orders_state=[]
+            # Reposicao: abre nova ordem no sentido do ultimo movimento
+            # Se preço veio de baixo (ultimo best LONG maior), abre SHORT; senao LONG
+            # Simplificacao segura: abre par completo novo na Ref para manter invariante
             qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
             if qty>0:
-                o1=self._place(symbol,"buy",qty,current_price,position_idx=1)
+                o1=self.ex.place_market_order(symbol,"buy",qty,position_idx=1)
                 if o1:
                     e=float(o1.get("average") or o1.get("price") or current_price)
                     self.orders_state.append({"id":f"LONG_CONV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
-                o2=self._place(symbol,"sell",qty,current_price,position_idx=2)
+                o2=self.ex.place_market_order(symbol,"sell",qty,position_idx=2)
                 if o2:
                     e=float(o2.get("average") or o2.get("price") or current_price)
                     self.orders_state.append({"id":f"SHORT_CONV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
             self._save_state()
 
+    def close_entire_cycle_PAPER_OK(self):
+        pass
     def close_entire_cycle(self, symbol, reason=""):
-        if self._is_paper(): self._close_all_paper()
-        else: self.ex.close_all_positions(symbol)
-        self.orders_state=[]
-        logger.info(f"Ciclo encerrado {symbol} ({reason}) Cofre {self.cfg.cofre:.2f} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
+        self.ex.close_all_positions(symbol); self.orders_state=[]
+        logger.info(f"Ciclo encerrado {symbol} ({reason}) Cofre ciclo {self.cfg.cofre:.2f}")
 
     def _handle_post_cycle_transition(self):
-        _tot=self.hist_long_pnl+self.hist_short_pnl
-        _win="LONG" if self.hist_long_pnl>self.hist_short_pnl else ("SHORT" if self.hist_short_pnl>self.hist_long_pnl else "EMPATE")
-        self.history.append({"ciclo":len(self.history)+1,"par":self.cfg.active_symbol,"total":round(_tot,4),"long":round(self.hist_long_pnl,4),"short":round(self.hist_short_pnl,4),"vencedor":_win})
-        self.hist_long_pnl=0.0; self.hist_short_pnl=0.0
         self.cfg.completed_operations+=1
-        self.cfg.cofre_global+=self.cfg.cofre
-        # Em papel, o equity simulado segue para o próximo ciclo
-        if self._is_paper(): self.paper_equity=self.cfg.cycle_initial_equity + self.cfg.cofre_global
-        self.cfg.cofre=0.0
+        self.cfg.cofre_global+=self.cfg.cofre; self.cfg.cofre=0.0
         if self.cfg.auto_mode and self.cfg.completed_operations < self.cfg.max_auto_operations:
             self.cfg.pair_index=(self.cfg.pair_index+1)%len(TOP_PAIRS)
             nxt=TOP_PAIRS[self.cfg.pair_index]
