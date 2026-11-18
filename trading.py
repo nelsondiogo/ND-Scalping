@@ -89,7 +89,7 @@ class MinimalistGridEngine:
             try:
                 if self.cfg.is_running: self.tick()
             except Exception as e: logger.error(f"tick err: {e}")
-            time.sleep(0.5)  # FIX: 0.5s para apanhar recuo logo
+            time.sleep(0.5)  # GRID: 0.5s
 
     def start_bot(self):
         with self.lock:
@@ -122,12 +122,15 @@ class MinimalistGridEngine:
             self._save_state()
 
     def initialize_cycle(self, symbol):
-        # Equity inicial: papel usa saldo simulado, real usa Bybit
+        # === ND GRID - 10 ORDENS INDEPENDENTES E ESTATICAS ===
+        # Ref FIXA, nunca mexe. Sem trailing, sem reancoragem, sem recuo.
+        # 5 LONG alvos +0.01/+0.02/+0.03/+0.04/+0.05 | 5 SHORT alvos +0.01/+0.02/+0.03/+0.04/+0.05
+        # Tocou no preco -> fecha, mete lucro no Cofre, fica FECHADA. As outras ficam a espera.
+        # Se preco sobe, bate nos LONG. Se desce, bate nos SHORT. Vai acumulando.
+        # Quando as 10 fecharem, ciclo novo com Ref nova.
         if self._is_paper():
             equity=self.cfg.paper_initial_balance if self.cfg.cycle_initial_equity<=0 else self.cfg.cycle_initial_equity
-            # Em papel, se já havia ciclo anterior, mantém o paper_equity acumulado
             if self.paper_equity>0: equity=self.paper_equity
-            logger.info(f"[PAPEL] Ciclo simulado - Equity inicial simulado {equity}")
         else:
             equity=self.ex.get_total_equity()
             if equity<0:
@@ -144,20 +147,24 @@ class MinimalistGridEngine:
         self.reference_price=float(ticker["last"])
         self.last_price=self.reference_price
         self.orders_state=[]; self.last_ref_touch=time.time(); self.cycle_start_time=time.time()
-        qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
-        if qty<=0:
+        qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
+        if qty_total<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
-        o_long=self._place(symbol,"buy",qty,self.reference_price,position_idx=1)
-        if o_long:
-            entry=float(o_long.get("average") or o_long.get("price") or self.reference_price)
-            self.orders_state.append({"id":"LONG_BASE","side":"buy","position_idx":1,"entry_price":entry,"best_price":entry,"qty":qty,"status":"ACTIVE"})
-        o_short=self._place(symbol,"sell",qty,self.reference_price,position_idx=2)
-        if o_short:
-            entry=float(o_short.get("average") or o_short.get("price") or self.reference_price)
-            self.orders_state.append({"id":"SHORT_BASE","side":"sell","position_idx":2,"entry_price":entry,"best_price":entry,"qty":qty,"status":"ACTIVE"})
+        qty_per = qty_total/10.0
+        for i in range(1,6):
+            tp = 0.01*i
+            tgt_long = self.reference_price + (tp/qty_per if qty_per>0 else 0)
+            o=self._place(symbol,"buy",qty_per,self.reference_price,position_idx=1)
+            if o:
+                e=float(o.get("average") or o.get("price") or self.reference_price)
+                self.orders_state.append({"id":f"GRID_LONG_{i}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty_per,"status":"ACTIVE","target_price":round(tgt_long,8),"target_profit":tp,"grid_level":i})
+            tgt_short = self.reference_price - (tp/qty_per if qty_per>0 else 0)
+            o2=self._place(symbol,"sell",qty_per,self.reference_price,position_idx=2)
+            if o2:
+                e2=float(o2.get("average") or o2.get("price") or self.reference_price)
+                self.orders_state.append({"id":f"GRID_SHORT_{i}","side":"sell","position_idx":2,"entry_price":e2,"best_price":e2,"qty":qty_per,"status":"ACTIVE","target_price":round(tgt_short,8),"target_profit":tp,"grid_level":i})
         mode="[PAPEL] " if self._is_paper() else "[REAL] "
-        self.cfg.status_message=f"{mode}Operando {symbol} | Ref: {self.reference_price:.4f} | Cofre: 0"
-        logger.info(f"{mode}Ciclo {symbol} Ref={self.reference_price} Equity0={equity}")
+        self.cfg.status_message=f"{mode}GRID 10 ordens {symbol} | Ref FIXA: {self.reference_price:.4f} | Qty/ordem: {qty_per:.2f}"
         self._save_state()
 
     def tick(self):
@@ -184,17 +191,18 @@ class MinimalistGridEngine:
                 if net<=-maxloss:
                     logger.info(f"STOP GLOBAL {net:.2f}")
                     self.close_entire_cycle(symbol, reason="Stop Global"); self.cfg.is_running=False; self.cfg.active_symbol=None; self._save_state(); return
-            # FIX GRAVE: trailing ANTES da reancoragem. Antes reanchor fazia return e o trailing nem era verificado, e _do_reanchor zerava o Cofre.
+            # GRID: sem reanchor, sem convergencia. So GRID. Reanchor era o que comia o Cofre.
             for slot in list(self.orders_state):
                 if slot["status"]=="ACTIVE": self._monitor_position(symbol, slot, current_price)
-            if self._should_reanchor(current_price):
-                self._do_reanchor(symbol, current_price); return
-            if abs(current_price-self.reference_price)/self.reference_price <= self.cfg.ref_tolerance_pct:
-                self.last_ref_touch=time.time()
-                self._check_convergence(symbol, current_price)
+            _act=[o for o in self.orders_state if o["status"]=="ACTIVE"]
+            if len(self.orders_state)>=10 and len(_act)==0:
+                try: self.cfg.cofre_global+=self.cfg.cofre
+                except Exception: pass
+                self.initialize_cycle(symbol); return
             self._save_state()
 
     def _should_reanchor(self, current_price):
+        return False  # GRID: reancoragem DESLIGADA - Ref fixa
         if self.reference_price<=0: return False
         dist=abs(current_price-self.reference_price)/self.reference_price
         if dist>=self.cfg.reanchor_distance_pct: return True
@@ -231,89 +239,42 @@ class MinimalistGridEngine:
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
-        # === TRAILING CIRURGICO FINAL - CORRIGE 2 ERROS GRAVES ===
-        # Erro 1: tick() fazia reanchor ANTES do trailing e fazia return - trailing nem era verificado, reanchor zerava Cofre. Corrigido: trailing ANTES.
-        # Erro 2: trailing velho 0.1% precisava de 0.075 de recuo em OP. Preco a +0.07 so recuou 0.005-0.01, nunca fechou.
-        # Regra final:
-        #  1. Ativa a 0.01 - perna ARMADA
-        #  2. Segue melhor preco - 0.01 -> 0.04 -> 0.07, acompanha, NAO fecha
-        #  3. Recuou 1 tick a partir do melhor -> fecha ALI MESMO (recuo ZERO)
-        #  4. TETO DURO 0.07 -> se atingir 0.07, fecha LOGO mesmo sem recuo, mesmo que preco continue a subir. Nao deixa 0.07 escapar por nada.
-        side=slot["side"]; entry=slot["entry_price"]
-        _p = (current_price-entry)*slot["qty"] if side=="buy" else (entry-current_price)*slot["qty"]
-        try: slot["best_profit"] = max(float(slot.get("best_profit", _p)), _p)
-        except Exception: slot["best_profit"] = _p
-        if slot["best_profit"] >= 0.01:
-            slot["armed"] = True
-        if not slot.get("armed", False):
-            if side=="buy":
-                if current_price>slot["best_price"]: slot["best_price"]=current_price
-            else:
-                if current_price<slot["best_price"]: slot["best_price"]=current_price
+        # === GRID MONITOR - TOCOU, FECHOU, COFRE ===
+        # Sem trailing. Sem recuo. Sem esperar.
+        # LONG: preco >= alvo -> fecha, mete target no Cofre. SHORT: preco <= alvo -> fecha.
+        # Exemplo OP Ref 0.0778 Qty/ordem 19.28: LONG_1 alvo 0.0783 (+0.01), LONG_5 alvo 0.0804 (+0.05).
+        if slot.get("target_price") is None:
             return
-        # TETO 0.07 - fecha logo, sem esperar recuo
-        if slot["best_profit"] >= 0.07:
-            _cs = "sell" if side=="buy" else "buy"
-            _idx = 1 if side=="buy" else 2
-            closed=self._place(symbol,_cs,slot["qty"],current_price,position_idx=_idx,reduce_only=True)
-            if not closed: return
-            _lock = _p if _p>0 else slot["best_profit"]
-            self.cfg.cofre+=_lock
-            try:
-                if side=="buy": self.hist_long_pnl+=_lock
-                else: self.hist_short_pnl+=_lock
-                self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Teto 0.07","price":current_price,"best":round(slot["best_profit"],4)})
-            except Exception: pass
-            slot["status"]="CLOSED"
-            qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
-            new_o=self._place(symbol, side, qty, current_price, position_idx=_idx)
-            if new_o:
-                e=float(new_o.get("average") or new_o.get("price") or current_price)
-                self.orders_state.append({"id":f"TC_{int(time.time())}","side":side,"position_idx":_idx,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0,"armed":False})
-            self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
-            return
-        # Segue melhor / recuo zero fecha
-        if side=="buy":
-            if current_price>slot["best_price"]:
-                slot["best_price"]=current_price
-                return
-            if current_price < slot["best_price"]:
+        _tp = float(slot.get("target_profit", 0.01))
+        _tgt = float(slot["target_price"])
+        _lvl = slot.get("grid_level", "?")
+        if slot["side"]=="buy":
+            if current_price >= _tgt:
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
                 if not closed: return
-                _lock = _p if _p>0 else 0.0
-                self.cfg.cofre+=_lock
+                _profit = (current_price-slot["entry_price"])*slot["qty"]
+                if _profit < _tp: _profit = _tp
+                self.cfg.cofre+=_profit
                 try:
-                    self.hist_long_pnl+=_lock
-                    self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trailing Cirurgico 0.01","price":current_price,"best":round(slot["best_profit"],4)})
+                    self.hist_long_pnl+=_profit
+                    self.history.append({"time":int(time.time()),"side":"buy","profit":round(_profit,4),"reason":f"GRID LONG {_lvl}","price":current_price,"target":_tgt})
                 except Exception: pass
                 slot["status"]="CLOSED"
-                qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
-                new_o=self._place(symbol,"buy",qty,current_price,position_idx=1)
-                if new_o:
-                    e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"LONG_TC_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0,"armed":False})
-                self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+                self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
                 return
         else:
-            if current_price<slot["best_price"]:
-                slot["best_price"]=current_price
-                return
-            if current_price > slot["best_price"]:
+            if current_price <= _tgt:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
                 if not closed: return
-                _lock = _p if _p>0 else 0.0
-                self.cfg.cofre+=_lock
+                _profit = (slot["entry_price"]-current_price)*slot["qty"]
+                if _profit < _tp: _profit = _tp
+                self.cfg.cofre+=_profit
                 try:
-                    self.hist_short_pnl+=_lock
-                    self.history.append({"time":int(time.time()),"side":side,"profit":round(_lock,4),"reason":"Trailing Cirurgico 0.01","price":current_price,"best":round(slot["best_profit"],4)})
+                    self.hist_short_pnl+=_profit
+                    self.history.append({"time":int(time.time()),"side":"sell","profit":round(_profit,4),"reason":f"GRID SHORT {_lvl}","price":current_price,"target":_tgt})
                 except Exception: pass
                 slot["status"]="CLOSED"
-                qty=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, current_price)
-                new_o=self._place(symbol,"sell",qty,current_price,position_idx=2)
-                if new_o:
-                    e=float(new_o.get("average") or new_o.get("price") or current_price)
-                    self.orders_state.append({"id":f"SHORT_TC_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE","best_profit":0.0,"armed":False})
-                self.orders_state=[o for o in self.orders_state if o["status"]!="CLOSED"]
+                self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
                 return
 
     def _check_convergence(self, symbol, current_price):
