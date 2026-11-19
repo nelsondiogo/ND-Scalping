@@ -25,8 +25,14 @@ class BotConfig:
         self.margin_per_order = float(os.getenv("MARGIN_PER_ORDER","5.0"))
         self.trailing_offset_pct = float(os.getenv("TRAILING_PCT","0.0025"))  # 0.25%
         self.ref_tolerance_pct = float(os.getenv("REF_TOL_PCT","0.0005"))
-        self.target_profit_pct = float(os.getenv("TARGET_PCT","1.0"))
-        self.max_loss_pct = float(os.getenv("MAX_LOSS_PCT","2.0"))
+        self.target_profit_pct = float(os.getenv("TARGET_PCT","1.0"))  # V6 FINAL: ja nao usado pelo tick (compatibilidade)
+        self.max_loss_pct = float(os.getenv("MAX_LOSS_PCT","2.0"))  # V6 FINAL: Stop Global de seguranca (2%) continua ativo
+        # V6 FINAL - Lucro por operacao (USDT). 0 = sem fim automatico.
+        self.lucro_por_operacao = float(os.getenv("LUCRO_POR_OPERACAO","0.0"))
+        # V6 FINAL - Modo: manual / auto
+        self.modo_operacao = os.getenv("MODO_OPERACAO","manual")
+        # V6 FINAL - Operacoes por dia em Auto. 0 = sem limite.
+        self.operacoes_por_dia = int(os.getenv("OPERACOES_POR_DIA","0"))
         # Reancoragem
         self.reanchor_distance_pct = float(os.getenv("REANCHOR_DIST_PCT","0.03"))
         self.reanchor_time_sec = int(os.getenv("REANCHOR_TIME_SEC","3600"))
