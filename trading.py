@@ -2,11 +2,10 @@ import time, threading, logging, json, os
 from config import TOP_PAIRS
 logger = logging.getLogger("ND-Trading")
 STATE_FILE = "state.json"
-# TRAVA ZERO RECUO - codigo fonte, NUNCA em Ajustes. Sempre ligada.
-# Acompanha o melhor preco desde a ativacao de cada ordem. Arma quando a ordem
-# cobre as taxas (lucro liquido > 0). Depois de armada, QUALQUER tick no sentido
-# oposto fecha a ordem no preco atual - zero recuo. Ordens que nunca armam
-# comportam-se como antes (alvo ou espera).
+# TRAVA SEGURANCA - codigo fonte, NUNCA em Ajustes. Sempre ligada.
+# Arma quando o lucro liquido da ordem >= 0.001 USDT.
+# Depois de armada, so fecha se o lucro liquido recuar 1.5% do melhor lucro liquido.
+# Nunca armou = nunca fecha por trava, espera pelo alvo.
 
 class MinimalistGridEngine:
     def __init__(self, exchange_manager, config):
@@ -22,21 +21,18 @@ class MinimalistGridEngine:
         self.hist_short_pnl=0.0
         self.history=[]
         self.last_price=0.0
-        self.last_tick_time=0.0  # V5: watchdog - ultimo tick do motor
-        self.closed_orders=[]  # V6: historico = ordens FECHADAS, cada uma com o seu lucro
-        self.bloquear_novas=False  # V6 FINAL: Cofre atingiu o lucro -> sem novas ordens
-        self.per_side=7  # V6: total 14 = 7 LONG + 7 SHORT (Ajustes)
+        self.last_tick_time=0.0
+        self.closed_orders=[]
+        self.bloquear_novas=False
+        self.per_side=7
         self.grid_step=20.0
         self.first_dist=10.0
         self._load_state()
 
-    # ---------- helpers PAPER ----------
     def _is_paper(self): return bool(getattr(self.cfg,"paper_trading",False))
     def _fee_rate(self):
-        # V6: papel simula taxa MAKER (0.01%) porque as PENDING sao ordens limite. Real usa a taxa da conta.
         return 0.0001 if self._is_paper() else float(getattr(self.cfg, "fee_rate", 0.00055))
     def _paper_place(self, symbol, side, qty, price, position_idx):
-        """Simula uma ordem - NÃO toca na Bybit"""
         fake={"id":f"PAPER_{int(time.time()*1000)}","average":price,"price":price,"side":side,"amount":qty}
         logger.info(f"[PAPEL] Ordem simulada {side} {symbol} qty={qty} @ {price} idx={position_idx}")
         return fake
@@ -48,7 +44,6 @@ class MinimalistGridEngine:
         self.orders_state=[]
         return True
     def _paper_equity(self, current_price):
-        """Equity simulado = Equity0 + Cofre + PnL flutuante das posições abertas"""
         if self.cfg.cycle_initial_equity<=0: return self.cfg.paper_initial_balance
         pnl=0.0
         for o in self.orders_state:
@@ -69,7 +64,6 @@ class MinimalistGridEngine:
         live=self.ex.fetch_positions_live(symbol)
         return sum(p["unrealizedPnl"] for p in live)
 
-    # ---------- persistencia ----------
     def _save_state(self):
         try:
             data={"ref":self.reference_price,"orders":self.orders_state,"active":self.cfg.active_symbol,
@@ -82,18 +76,15 @@ class MinimalistGridEngine:
         if not os.path.exists(STATE_FILE): return
         try:
             with open(STATE_FILE) as f: d=json.load(f)
-            # Se mudou de modo (papel <-> real), NÃO restaura estado antigo - evita confusão
             if bool(d.get("paper",False)) != self._is_paper():
                 logger.info("Mudança de modo Papel/Real - estado antigo ignorado")
                 return
-            # V6 FINAL: o ciclo antigo NAO volta. So o historico e o cofre_global voltam.
             self.reference_price=0.0; self.orders_state=[]
             self.cfg.active_symbol=None; self.cfg.cycle_initial_equity=0; self.cfg.cofre=0.0
             self.cfg.cofre_global=d.get("cofre_global",0)
             self.last_ref_touch=time.time(); self.cycle_start_time=0
             self.paper_equity=0.0
             _h=d.get("history",[])
-            # estado antigo (resumos de ciclo) nao e lista de ordens -> ignora
             if isinstance(_h, list) and _h and isinstance(_h[0], dict) and "ciclo" in _h[0]:
                 self.closed_orders=[]
             else:
@@ -111,12 +102,12 @@ class MinimalistGridEngine:
             try:
                 if self.cfg.is_running: self.tick()
             except Exception as e: logger.error(f"tick err: {e}")
-            time.sleep(0.5)  # GRID V6: 0.5s
+            time.sleep(0.5)
 
     def start_bot(self):
         with self.lock:
             self.cfg.completed_operations=0; self.cfg.is_running=True
-            pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair  # FIX Auto
+            pair=TOP_PAIRS[TOP_PAIRS.index(self.cfg.selected_pair) % len(TOP_PAIRS)] if self.cfg.auto_mode else self.cfg.selected_pair
             self.initialize_cycle(pair)
 
     def switch_pair(self, new_pair):
@@ -147,16 +138,6 @@ class MinimalistGridEngine:
             self._save_state()
 
     def initialize_cycle(self, symbol):
-        # === ND GRID V6 CORRETO - Ref no centro, LONG acima, SHORT abaixo ===
-        # ERRO DO GRID V1: as 10 ordens abriam TODAS na Ref (0.0774). Dashboard mostrava 10x a mesma entrada.
-        # CORRETO: ordens PENDENTES nos niveis. Nao abrem na Ref. Esperam o preco chegar.
-        # Ref no centro. Ex OP Ref 0.0774, passo 0.0005 (da ~0.01 de lucro com Qty 19.37):
-        #  LONG 1 entrada 0.0779 (Ref+passo), alvo 0.0784 (+0.01) | LONG 2 entrada 0.0784, alvo 0.0789 | ... LONG 5 entrada 0.0794, alvo 0.0799
-        #  SHORT 1 entrada 0.0769 (Ref-passo), alvo 0.0764 (+0.01) | SHORT 2 entrada 0.0764, alvo 0.0759 | ... SHORT 5 entrada 0.0754, alvo 0.0749
-        # Preco SOBE -> toca LONG 1, abre, sobe mais, fecha +0.01 Cofre. Depois LONG 2, LONG 3...
-        # Preco VOLTA A DESCER -> toca SHORT 1, abre, desce mais, fecha +0.01. Depois SHORT 2...
-        # Ganha nas 2 direccoes. Perna positiva ganha quando preco a favor. Perna negativa so ganha quando preco reverte e atinge os precos das ordens abertas.
-        # Sem trailing, sem reancoragem. Ref FIXA o ciclo todo.
         if self._is_paper():
             equity=self.cfg.paper_initial_balance if self.cfg.cycle_initial_equity<=0 else self.cfg.cycle_initial_equity
             if self.paper_equity>0: equity=self.paper_equity
@@ -179,13 +160,9 @@ class MinimalistGridEngine:
         qty_total=self.ex.calculate_qty(symbol, self.cfg.margin_per_order, self.cfg.leverage, self.reference_price)
         if qty_total<=0:
             self.cfg.is_running=False; self.cfg.status_message="Qty invalido"; return
-        # V5 - Passo ABSOLUTO em preco, livre, so nao pode ser 0. Ex BTC 20 | OP 0.0015.
         _step = float(getattr(self.cfg, "grid_step_price", 20.0))
         if _step==0: _step = 20.0
         if _step<0: _step = abs(_step)
-        # V6 - Ref = preco no INICIAR. NADA abre na Ref. Tudo PENDING.
-        # Primeira distancia = passo/2 (ex passo 40 -> 20). LONG 1 = Ref+20, alvo +40. SHORT 1 = Ref-20, alvo -40.
-        # Total dos Ajustes: total 14 = 7 LONG + 7 SHORT. LONG i = Ref + primeira + passo*(i-1). SHORT i = Ref - primeira - passo*(i-1).
         _total=int(getattr(self.cfg, "total_orders", 14))
         if _total<2: _total=2
         _per=max(1, _total//2)
@@ -196,30 +173,28 @@ class MinimalistGridEngine:
         for i in range(1, _per+1):
             entry_long = self.reference_price + self.first_dist + _step*(i-1)
             tgt_long = entry_long + _step
-            self.orders_state.append({"id":f"GRID_LONG_{i}","side":"buy","position_idx":1,"entry_price":round(entry_long,8),"best_price":round(entry_long,8),"qty":qty_per,"status":"PENDING","target_price":round(tgt_long,8),"target_profit":_profit_per,"grid_level":i,"grid_step":round(_step,8)})
+            self.orders_state.append({"id":f"GRID_LONG_{i}","side":"buy","position_idx":1,"entry_price":round(entry_long,8),"best_price":round(entry_long,8),"best_net":0.0,"qty":qty_per,"status":"PENDING","target_price":round(tgt_long,8),"target_profit":_profit_per,"grid_level":i,"grid_step":round(_step,8)})
             entry_short = self.reference_price - self.first_dist - _step*(i-1)
             tgt_short = entry_short - _step
-            self.orders_state.append({"id":f"GRID_SHORT_{i}","side":"sell","position_idx":2,"entry_price":round(entry_short,8),"best_price":round(entry_short,8),"qty":qty_per,"status":"PENDING","target_price":round(tgt_short,8),"target_profit":_profit_per,"grid_level":i,"grid_step":round(_step,8)})
+            self.orders_state.append({"id":f"GRID_SHORT_{i}","side":"sell","position_idx":2,"entry_price":round(entry_short,8),"best_price":round(entry_short,8),"best_net":0.0,"qty":qty_per,"status":"PENDING","target_price":round(tgt_short,8),"target_profit":_profit_per,"grid_level":i,"grid_step":round(_step,8)})
         mode="[PAPEL] " if self._is_paper() else "[REAL] "
         self.cfg.status_message=f"{mode}GRID V6 {symbol} | Ref: {self.reference_price:.4f} | Passo: {_step:.4f} | 1a ordem a {_step/2:.4f} da Ref | {_per*2} ordens ({_per} LONG + {_per} SHORT) | Qty/ordem: {qty_per:.8f} | Tudo PENDING"
         self._save_state()
 
     def tick(self):
         with self.lock:
-            self.last_tick_time=time.time()  # V5: marca cada tick, o Dashboard vigia
+            self.last_tick_time=time.time()
             if not self.cfg.is_running or not self.cfg.active_symbol: return
             symbol=self.cfg.active_symbol
             try: ticker=self.ex.fetch_ticker(symbol)
             except Exception: return
             current_price=float(ticker["last"])
-            # Equity: papel = simulado, real = Bybit
             if self._is_paper():
                 equity=self._paper_equity(current_price)
                 self.paper_equity=equity
             else:
                 equity=self.ex.get_total_equity()
                 if equity<0: return
-            # V6 FINAL: Cofre atingiu o lucro -> sem novas ordens (espelhos e extensao bloqueados).
             _lucro_cfg = float(getattr(self.cfg, "lucro_por_operacao", 0) or 0)
             self.bloquear_novas = (_lucro_cfg > 0 and self.cfg.cofre >= _lucro_cfg)
             if self.cfg.cycle_initial_equity>0:
@@ -228,11 +203,9 @@ class MinimalistGridEngine:
                 if net<=-maxloss:
                     logger.info(f"STOP GLOBAL {net:.2f}")
                     self.close_entire_cycle(symbol, reason="Stop Global"); self.cfg.is_running=False; self.cfg.active_symbol=None; self._save_state(); return
-            # GRID V6: sem reanchor, sem convergencia. So GRID.
             for slot in list(self.orders_state):
                 if slot["status"] in ("PENDING","ACTIVE"): self._monitor_position(symbol, slot, current_price)
             self._extend_grid(symbol, current_price)
-            # V6 FINAL: regra da vantagem - se fechar tudo agora e ficar >= lucro definido, encerra a operacao.
             if _lucro_cfg > 0 and self._vantagem(symbol, current_price) >= _lucro_cfg:
                 self._encerrar_operacao(symbol, reason="Lucro Operacao")
                 return
@@ -244,14 +217,7 @@ class MinimalistGridEngine:
             self._save_state()
 
     def _should_reanchor(self, current_price):
-        return False  # GRID V6: reancoragem DESLIGADA - Ref fixa
-        if self.reference_price<=0: return False
-        dist=abs(current_price-self.reference_price)/self.reference_price
-        if dist>=self.cfg.reanchor_distance_pct: return True
-        elapsed=time.time()-self.last_ref_touch
-        if elapsed>=self.cfg.reanchor_time_sec and dist>=self.cfg.reanchor_min_distance_pct: return True
         return False
-
     def _do_reanchor(self, symbol, current_price):
         logger.info(f"REANCORAGEM {symbol} {self.reference_price} -> {current_price} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
         pnl_conj=self._live_positions_pnl(symbol, current_price)
@@ -272,28 +238,22 @@ class MinimalistGridEngine:
             o1=self._place(symbol,"buy",qty,current_price,position_idx=1)
             if o1:
                 e=float(o1.get("average") or o1.get("price") or current_price)
-                self.orders_state.append({"id":f"LONG_REANCH_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                self.orders_state.append({"id":f"LONG_REANCH_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"best_net":0.0,"qty":qty,"status":"ACTIVE"})
             o2=self._place(symbol,"sell",qty,current_price,position_idx=2)
             if o2:
                 e=float(o2.get("average") or o2.get("price") or current_price)
-                self.orders_state.append({"id":f"SHORT_REANCH_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                self.orders_state.append({"id":f"SHORT_REANCH_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"best_net":0.0,"qty":qty,"status":"ACTIVE"})
         self.cfg.status_message=f"{'[PAPEL] ' if self._is_paper() else ''}Reancorado {symbol} | Nova Ref: {current_price:.4f} | CofreGlobal: {self.cfg.cofre_global:.2f}"
         self._save_state()
 
     def _monitor_position(self, symbol, slot, current_price):
-        # === GRID V6 MONITOR - PENDING -> ACTIVE -> CLOSED ===
-        # PENDING: espera o preco tocar na entrada. LONG: preco >= entrada -> abre (ACTIVE). SHORT: preco <= entrada -> abre.
-        # ACTIVE: espera o preco tocar no alvo. LONG: preco >= alvo -> fecha +0.01 Cofre. SHORT: preco <= alvo -> fecha +0.01.
-        # Exemplo: Ref 0.0774, LONG 1 entrada 0.0779. Preco sobe 0.0774 -> 0.0779: LONG 1 abre. Preco sobe 0.0779 -> 0.0784: LONG 1 fecha +0.01.
-        # Preco volta a descer 0.0784 -> 0.0769: SHORT 1 abre. Desce 0.0769 -> 0.0764: SHORT 1 fecha +0.01. Ganha nas 2 direccoes.
         if slot["status"]=="PENDING":
             if slot["side"]=="buy" and current_price >= slot["entry_price"]:
-                # Abre LONG: simula em Papel, ordem real em Real
                 o=self._place(symbol,"buy",slot["qty"],current_price,position_idx=1)
                 if not o: return
                 slot["status"]="ACTIVE"
                 slot["open_price"]=current_price
-                # CIRURGICO: alvo a partir do preco REAL de abertura (salto de preco nao deixa o alvo abaixo da entrada)
+                slot["best_net"]=0.0
                 _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
                 slot["target_price"]=round(current_price+_stp,8)
                 return
@@ -302,6 +262,7 @@ class MinimalistGridEngine:
                 if not o: return
                 slot["status"]="ACTIVE"
                 slot["open_price"]=current_price
+                slot["best_net"]=0.0
                 _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
                 slot["target_price"]=round(current_price-_stp,8)
                 return
@@ -312,64 +273,59 @@ class MinimalistGridEngine:
         _lvl = slot.get("grid_level", "?")
         _open = float(slot.get("open_price", slot["entry_price"]))
         _qty = float(slot.get("qty", 0) or 0)
-        # TRAVA: atualiza o melhor preco a favor - nunca volta atras.
+        # TRAVA SEGURANCA: arma a 0.001 liquido, recua no max 1.5% do melhor liquido
+        _rate = self._fee_rate()
         if slot["side"]=="buy":
             if current_price > float(slot.get("best_price", _open)): slot["best_price"]=current_price
+            _net_now = (current_price - _open)*_qty - _rate*(_open + current_price)*_qty
         else:
             if current_price < float(slot.get("best_price", _open)): slot["best_price"]=current_price
-        # TRAVA ZERO RECUO: arma quando a ordem ja cobre as taxas (lucro liquido > 0).
-        # Depois de armada, QUALQUER tick no sentido oposto fecha a ordem no preco atual.
-        _rate = self._fee_rate()
-        _fee_rt = 2*_rate*_open*_qty  # taxas ida+volta (aprox)
-        _lock_move = _fee_rt/_qty if _qty>0 else 0  # movimento ate ao breakeven
-        _best = float(slot.get("best_price", _open))
+            _net_now = (_open - current_price)*_qty - _rate*(_open + current_price)*_qty
+        if _net_now > float(slot.get("best_net", 0.0)):
+            slot["best_net"] = _net_now
+        _best_net = float(slot.get("best_net", 0.0))
+        _armed = _best_net >= 0.001
+        _hit_trava = _armed and (_net_now <= _best_net * 0.985)
         if slot["side"]=="buy":
-            _locked = _open + _lock_move
-            _hit_trava = (_best > _locked) and (current_price < _best)
             _hit_alvo = current_price >= _tgt
             if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
                 if not closed: return
                 _gross = (current_price-_open)*slot["qty"]
                 _fee = self._fee_rate()*(_open+current_price)*slot["qty"]
-                _profit = _gross - _fee  # V6: lucro LIQUIDO de taxas maker
+                _profit = _gross - _fee
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_long_pnl+=_profit
                     _rsn = (f"TRAVA LONG {_lvl}" if (_hit_trava and not _hit_alvo) else f"GRID V6 LONG {_lvl}")
                     self.closed_orders.append({"time":int(time.time()),"side":"buy","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":_rsn})
                 except Exception: pass
-                self._spawn_mirror(symbol, "sell", current_price)  # V6 espelho: SHORT 1 passo abaixo do fecho
+                self._spawn_mirror(symbol, "sell", current_price)
                 slot["status"]="CLOSED"
                 self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
                 return
         else:
-            _locked = _open - _lock_move
-            _hit_trava = (_best < _locked) and (current_price > _best)
             _hit_alvo = current_price <= _tgt
             if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
                 if not closed: return
                 _gross = (_open-current_price)*slot["qty"]
                 _fee = self._fee_rate()*(_open+current_price)*slot["qty"]
-                _profit = _gross - _fee  # V6: lucro LIQUIDO de taxas maker
+                _profit = _gross - _fee
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_short_pnl+=_profit
                     _rsn = (f"TRAVA SHORT {_lvl}" if (_hit_trava and not _hit_alvo) else f"GRID V6 SHORT {_lvl}")
                     self.closed_orders.append({"time":int(time.time()),"side":"sell","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":_rsn})
                 except Exception: pass
-                self._spawn_mirror(symbol, "buy", current_price)  # V6 espelho: LONG 1 passo acima do fecho
+                self._spawn_mirror(symbol, "buy", current_price)
                 slot["status"]="CLOSED"
                 self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
                 return
 
     def _spawn_mirror(self, symbol, side, close_price):
-        # V6 ESPELHO ping-pong: LONG fecha a C -> SHORT PENDING a C-passo, alvo C-2*passo.
-        # SHORT fecha a C -> LONG PENDING a C+passo, alvo C+2*passo. Ao fechar, cria outro de volta.
-        # Sem duplicados: se ja existe PENDING/ACTIVE do mesmo lado na mesma entrada, nao cria outro.
         try:
-            if getattr(self, "bloquear_novas", False): return  # V6 FINAL: Cofre atingiu o lucro - sem novas ordens
+            if getattr(self, "bloquear_novas", False): return
             _step=float(getattr(self, "grid_step", 0) or 0)
             if _step<=0: return
             if side=="sell":
@@ -383,12 +339,11 @@ class MinimalistGridEngine:
             for o in self.orders_state:
                 if o.get("qty"): _qty=float(o["qty"]); break
             if _qty<=0: return
-            self.orders_state.append({"id":f"ESP_{side}_{_entry}","side":side,"position_idx":_pos,"entry_price":_entry,"best_price":_entry,"qty":_qty,"status":"PENDING","target_price":_tgt,"target_profit":round(_step*_qty,6),"grid_level":0,"grid_step":round(_step,8),"mirror":True})
+            self.orders_state.append({"id":f"ESP_{side}_{_entry}","side":side,"position_idx":_pos,"entry_price":_entry,"best_price":_entry,"best_net":0.0,"qty":_qty,"status":"PENDING","target_price":_tgt,"target_profit":round(_step*_qty,6),"grid_level":0,"grid_step":round(_step,8),"mirror":True})
         except Exception as e: logger.error(f"mirror: {e}")
     def _extend_grid(self, symbol, current_price):
-        # V6: se o preco foge para la da ponta do grid, o grid estende-se sozinho (1 nivel por tick, max 200 ordens).
         try:
-            if getattr(self, "bloquear_novas", False): return  # V6 FINAL: Cofre atingiu o lucro - sem novas ordens
+            if getattr(self, "bloquear_novas", False): return
             if len(self.orders_state)>=200: return
             _step=float(getattr(self, "grid_step", 0) or 0)
             if _step<=0: return
@@ -399,23 +354,21 @@ class MinimalistGridEngine:
                 if current_price > _max:
                     _e=round(_max+_step,8)
                     _q=float(_longs[0].get("qty",0))
-                    self.orders_state.append({"id":f"GRID_LONG_X_{_e}","side":"buy","position_idx":1,"entry_price":_e,"best_price":_e,"qty":_q,"status":"PENDING","target_price":round(_e+_step,8),"target_profit":round(_step*_q,6),"grid_level":99,"grid_step":round(_step,8)})
+                    self.orders_state.append({"id":f"GRID_LONG_X_{_e}","side":"buy","position_idx":1,"entry_price":_e,"best_price":_e,"best_net":0.0,"qty":_q,"status":"PENDING","target_price":round(_e+_step,8),"target_profit":round(_step*_q,6),"grid_level":99,"grid_step":round(_step,8)})
             if _shorts:
                 _min=min(float(o["entry_price"]) for o in _shorts)
                 if current_price < _min:
                     _e=round(_min-_step,8)
                     _q=float(_shorts[0].get("qty",0))
-                    self.orders_state.append({"id":f"GRID_SHORT_X_{_e}","side":"sell","position_idx":2,"entry_price":_e,"best_price":_e,"qty":_q,"status":"PENDING","target_price":round(_e-_step,8),"target_profit":round(_step*_q,6),"grid_level":99,"grid_step":round(_step,8)})
+                    self.orders_state.append({"id":f"GRID_SHORT_X_{_e}","side":"sell","position_idx":2,"entry_price":_e,"best_price":_e,"best_net":0.0,"qty":_q,"status":"PENDING","target_price":round(_e-_step,8),"target_profit":round(_step*_q,6),"grid_level":99,"grid_step":round(_step,8)})
         except Exception as e: logger.error(f"extend: {e}")
     @property
     def history(self):
-        # V6: history = ordens fechadas (cada uma com lucro). O frontend soma o total no topo.
         return list(getattr(self, "closed_orders", []))
     @history.setter
     def history(self, v):
         self.closed_orders = list(v or [])
     def _vantagem(self, symbol, current_price):
-        # V6 FINAL: quanto fica a operacao se fechar TUDO agora (Cofre + flutuante liquido de taxas).
         _f = 0.0
         _rate = self._fee_rate()
         for o in self.orders_state:
@@ -426,8 +379,6 @@ class MinimalistGridEngine:
         return self.cfg.cofre + _f
 
     def _encerrar_operacao(self, symbol, reason="Lucro Operacao"):
-        # V6 FINAL: fecha tudo (negativas podem fechar com perda - o saldo positivo cobre-as),
-        # Cofre vai para o principal/global. Manual: para. Auto: nova operacao com as mesmas configuracoes.
         self.close_entire_cycle(symbol, reason=reason)
         self._fold_cofre_to_principal()
         self.cfg.completed_operations += 1
@@ -465,15 +416,14 @@ class MinimalistGridEngine:
                 o1=self._place(symbol,"buy",qty,current_price,position_idx=1)
                 if o1:
                     e=float(o1.get("average") or o1.get("price") or current_price)
-                    self.orders_state.append({"id":f"LONG_CONV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                    self.orders_state.append({"id":f"LONG_CONV_{int(time.time())}","side":"buy","position_idx":1,"entry_price":e,"best_price":e,"best_net":0.0,"qty":qty,"status":"ACTIVE"})
                 o2=self._place(symbol,"sell",qty,current_price,position_idx=2)
                 if o2:
                     e=float(o2.get("average") or o2.get("price") or current_price)
-                    self.orders_state.append({"id":f"SHORT_CONV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"qty":qty,"status":"ACTIVE"})
+                    self.orders_state.append({"id":f"SHORT_CONV_{int(time.time())}","side":"sell","position_idx":2,"entry_price":e,"best_price":e,"best_net":0.0,"qty":qty,"status":"ACTIVE"})
             self._save_state()
 
     def _fold_cofre_to_principal(self):
-        # V6: sempre que o robo para, o Cofre entra no saldo principal. Papel: principal += cofre. Real: saldo na Bybit, cofre vai para global.
         try:
             _c=float(self.cfg.cofre)
             if self._is_paper():
@@ -485,7 +435,6 @@ class MinimalistGridEngine:
             logger.info(f"V6 FOLD Cofre {_c:.4f} -> principal")
         except Exception as e: logger.error(f"fold: {e}")
     def close_entire_cycle(self, symbol, reason=""):
-        # V6: realiza as ACTIVE ao preco atual (lucro/prejuizo liquido de taxas), regista cada fecho, limpa o grid. NAO faz fold (quem chama decide).
         try:
             _t=self.ex.fetch_ticker(symbol); _px=float(_t["last"])
         except Exception: _px=float(getattr(self, "last_price", 0) or 0)
@@ -508,7 +457,6 @@ class MinimalistGridEngine:
         logger.info(f"Ciclo encerrado {symbol} ({reason}) Cofre {self.cfg.cofre:.4f} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
 
     def _handle_post_cycle_transition(self):
-        # V6: historico = ordens fechadas (nao resumos). O resumo do ciclo fica em last_cycle_summary.
         _tot=self.hist_long_pnl+self.hist_short_pnl
         _win="LONG" if self.hist_long_pnl>self.hist_short_pnl else ("SHORT" if self.hist_short_pnl>self.hist_long_pnl else "EMPATE")
         self.last_cycle_summary={"ciclo":len(getattr(self, "cycle_summaries", []))+1,"par":self.cfg.active_symbol,"total":round(_tot,4),"long":round(self.hist_long_pnl,4),"short":round(self.hist_short_pnl,4),"vencedor":_win}
