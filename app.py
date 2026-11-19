@@ -6,7 +6,7 @@
 #  - Recuo = 1.5% do melhor lucro liquido atingido
 #  - Nunca armada = nunca fecha por trava
 
-import os, time, threading, json
+import os, time, threading, json, urllib.request
 from datetime import datetime
 from flask import Flask, jsonify, render_template_string, request
 import ccxt
@@ -41,7 +41,7 @@ state = {
     "mode": MODE, "ops_per_day": OPS_PER_DAY,
     "margin": MARGIN_PER_ORDER, "leverage": LEVERAGE,
     "step": STEP, "total_orders": TOTAL_ORDERS,
-    "symbol": SYMBOL, "paper": PAPER_TRADING,
+    "symbol": SYMBOL, "paper": PAPER_TRADING, "price_error": "",
 }
 lock = threading.Lock()
 
@@ -76,9 +76,33 @@ def gross_profit(o, price):
 def get_price():
     try:
         t = exchange.fetch_ticker(SYMBOL)
-        return float(t["last"])
-    except Exception:
-        return state["price"]
+        v = float(t["last"])
+        if v > 0:
+            state["price_error"] = ""
+            return v
+    except Exception as e:
+        state["price_error"] = "ccxt linear: %s" % e
+    try:
+        t = exchange.fetch_ticker("BTC/USDT")
+        v = float(t["last"])
+        if v > 0:
+            state["price_error"] = ""
+            return v
+    except Exception as e:
+        state["price_error"] = "ccxt spot: %s" % e
+    try:
+        req = urllib.request.Request(
+            "https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT",
+            headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode())
+        v = float(data["result"]["list"][0]["lastPrice"])
+        if v > 0:
+            state["price_error"] = ""
+            return v
+    except Exception as e:
+        state["price_error"] = "bybit public: %s" % e
+    return state["price"]
 
 def build_grid(ref):
     orders = []
@@ -220,7 +244,7 @@ label{font-size:12px;color:#94a3b8}
 .hist-line{font-size:13px;padding:8px 0;border-bottom:1px solid #1f2937}
 </style></head><body>
 <div class="top"><h1>ND-SCALPING</h1><span class="badge" id="badge">PAPEL</span>
-<div class="small">Atualizado: <span id="updated">--</span></div></div>
+<div class="small">Atualizado: <span id="updated">--</span></div><div class="small" id="statusLine">Ligacao: ...</div></div>
 <div class="cards"><div class="card"><div class="lbl">INICIAL</div><div class="val" id="initial">--</div></div>
 <div class="card"><div class="lbl">ATUAL</div><div class="val" id="atual">--</div></div></div>
 
@@ -275,6 +299,10 @@ hist.forEach(function(v,i){let x=i/(hist.length-1)*c.width;let y=130-(v-mn)/((mx
 ctx.stroke();}
 async function tick(){try{let r=await fetch('/api/state');let s=await r.json();
 document.getElementById('updated').textContent=s.updated||'--';
+let st=document.getElementById('statusLine');if(st){st.textContent=s.price_error?('Ligacao: '+s.price_error):'Ligacao: OK';st.style.color=s.price_error?'#f87171':'#22c55e';}
+if(document.activeElement!==document.getElementById('cfgProfit')){document.getElementById('cfgProfit').value=s.profit_per_operation;}
+if(document.activeElement!==document.getElementById('cfgMode')){document.getElementById('cfgMode').value=s.mode;}
+if(document.activeElement!==document.getElementById('cfgOps')){document.getElementById('cfgOps').value=s.ops_per_day;}
 document.getElementById('initial').textContent=Number(s.initial).toFixed(2)+' USDT';
 document.getElementById('atual').textContent=Number(s.balance).toFixed(2)+' USDT';
 document.getElementById('badge').textContent=s.paper?'PAPEL':'REAL';
