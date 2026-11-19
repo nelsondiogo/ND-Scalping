@@ -1,160 +1,223 @@
-# app.py - ND-SCALPING V6 - Frontend + API compativel com trading.py
-# Resolve "Sem ligacao ao servidor": expoe /api/status, /status, /health que o frontend usa.
+
+# ND-SCALPING V6 Final — Trava corrigida
+# Regra da trava (so no codigo-fonte, nunca em Ajustes):
+#   - Arma SOMENTE quando o lucro BRUTO >= 0.002 USDT (o valor que ves no ecra)
+#   - Recuo = ZERO. Acompanha o melhor bruto, 1 tick contra fecha.
+#   - Nunca armada = nunca fecha por trava
+#   - Apos armada, fecha quando o bruto cair 1 tick abaixo do melhor bruto
+# UNICO AJUSTE do V6: 0.001 liquido + recuo 1.5% -> 0.002 bruto + recuo 0. Resto igual.
+
+import os, time, threading, json
+from datetime import datetime
 from flask import Flask, jsonify, request, render_template_string
-from trading import MinimalistGridEngine, fetch_price
-import threading
+import ccxt
 
 app = Flask(__name__)
-engine = MinimalistGridEngine()
-try:
-    engine.start_background_loop()
-except Exception:
-    pass
 
-HTML = r"""<!doctype html><html lang="pt"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ND-SCALPING</title><style>
-body{background:#0b1220;color:#e8eef5;font-family:system-ui,Arial,sans-serif;margin:0;padding:0}
-.top{padding:14px 16px;background:#0a0f1a;border-bottom:1px solid #1e2a3a}
-.top b{color:#22c55e;font-size:22px}.badge{background:#f59e0b;color:#000;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:800}
-.sub{color:#9fb0c3;font-size:13px;margin-top:4px}.sub.ok{color:#22c55e}.sub.err{color:#f87171}
-.card{background:#132033;border:1px solid #1e2a3a;border-radius:14px;margin:12px;padding:14px}
-.card h3{color:#38bdf8;margin:0 0 8px;font-size:14px;letter-spacing:1px}
-.big{font-size:26px;font-weight:800}.mut{color:#9fb0c3;font-size:13px}
-.row{display:flex;gap:10px}.col{flex:1;background:#132033;border:1px solid #1e2a3a;border-radius:14px;margin:0 0 0 12px;padding:12px}.col:last-child{margin-right:12px}
-button{padding:12px 16px;border:0;border-radius:10px;font-weight:800;cursor:pointer;font-size:14px}
-.btn-start{background:#22c55e;color:#000}.btn-stop{background:#ef4444;color:#fff}
-.tabs{position:fixed;bottom:0;left:0;right:0;background:#0a0f1a;display:flex;gap:8px;padding:10px;justify-content:center;border-top:1px solid #1e2a3a}
-.tabs button{background:#1e2a3a;color:#cbd5e1}.tabs button.on{background:#22c55e;color:#000}
-section{display:none}section.on{display:block}.pad{padding-bottom:80px}
-input{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;margin:4px 0 10px}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:6px;border-bottom:1px solid #1e2a3a;text-align:left}
-.pos{color:#22c55e}.neg{color:#ef4444}
-</style></head><body><div class="pad">
-<div class="top"><b>ND-SCALPING</b> <span class="badge">PAPEL</span><div class="sub" id="conn">A ligar ao servidor...</div></div>
+# ---------------- CONFIG ----------------
+SYMBOL = os.environ.get("SYMBOL", "BTC/USDT:USDT")
+PAPER_TRADING = os.environ.get("PAPER_TRADING", "True") == "True"
+PAPER_INITIAL_BALANCE = float(os.environ.get("PAPER_INITIAL_BALANCE", "1000.0"))
+MARGIN_PER_ORDER = float(os.environ.get("MARGIN_PER_ORDER", "5.0"))
+LEVERAGE = int(os.environ.get("LEVERAGE", "3"))
+STEP = float(os.environ.get("STEP", "40.0"))          # passo em preco (BTC 40)
+TOTAL_ORDERS = int(os.environ.get("TOTAL_ORDERS", "14"))  # 7 LONG + 7 SHORT
+PROFIT_PER_OPERATION = float(os.environ.get("PROFIT_PER_OPERATION", "0.05"))  # USDT
+MODE = os.environ.get("MODE", "MANUAL")  # MANUAL | AUTO
+OPS_PER_DAY = int(os.environ.get("OPS_PER_DAY", "0"))  # 0 = sem limite
 
-<section id="tab-dashboard" class="on">
-<div class="card"><h3>STATUS</h3><div class="big" id="status">PARADO</div><div class="mut" id="statusline">A aguardar...</div><div style="margin-top:10px"><button class="btn-start" onclick="startBot()">▶ INICIAR</button> <button class="btn-stop" onclick="stopBot()">■ PARAR</button></div></div>
-<div class="row"><div class="col"><h3>INICIAL</h3><div class="big" id="inicial">--</div></div><div class="col"><h3>ATUAL</h3><div class="big" id="atual">--</div></div></div>
-<div class="card"><h3>POSICAO ATUAL - AO VIVO</h3><div class="mut" id="posline">Preco agora: -- | Ref: --</div><div style="margin-top:8px"><b id="total">TOTAL AGORA: +0.0000</b> | Cofre ciclo: <span id="cofre_ciclo">0.0000</span> | Cofre global: <span id="cofre_global">0.0000</span></div><div class="mut" style="margin-top:8px">LONG ganha quando o preco SOBE. SHORT ganha quando o preco DESCE.</div></div>
-<div class="card"><h3>GRID — REF NO CENTRO</h3><div class="mut">Nao importa a direcao, o robo sempre ganha ate ao lucro definido. Sobe → fecha LONG. Desce → fecha SHORT. Vai e volta → fecha dos dois lados.</div><div style="text-align:center;margin:12px 0;color:#facc15">--- Ref: <span id="ref">--</span> ---</div><div style="display:flex;gap:10px"><div style="flex:1;background:#3a1414;padding:10px;border-radius:10px;color:#f87171">▼ SHORT — ABAIXO DA REF</div><div style="flex:1;background:#12331f;padding:10px;border-radius:10px;color:#22c55e">▲ LONG — ACIMA DA REF</div></div></div>
-</section>
+# Trava de seguranca — FIXA no codigo
+TRAVA_ARMAR_BRUTO = 0.002  # arma quando lucro BRUTO >= 0.002 USDT
+TRAVA_RECUO_FRAC = 0.0     # recuo ZERO: 1 tick contra fecha
+FEE_RATE = 0.0001          # maker Bybit (papel)
 
-<section id="tab-mercado">
-<div class="card"><h3>MERCADO - GRAFICO EM TEMPO REAL</h3><div class="mut">Preco atual: <span id="m_preco">--</span> | Ref (entrada): <span id="m_ref">--</span></div><canvas id="chart" width="340" height="180" style="width:100%;background:#0a0f1a;border-radius:10px;margin-top:10px"></canvas><div class="mut" style="margin-top:8px">Linha amarela no meio = Ref. Linha azul = preco. Ultimos ~4 minutos.</div></div>
-<div class="card"><h3>MERCADO - POSICOES ATIVAS</h3><div id="ativas">Preco atual: --</div></div>
-</section>
-
-<section id="tab-historico">
-<div class="card"><h3>HISTORICO</h3><div id="hist">Sem ciclos concluidos.</div></div>
-</section>
-
-<section id="tab-ajustes">
-<div class="card"><h3>AJUSTES</h3><div class="mut">Trava: 0.002 bruto, sem % , 1 tick contra fecha. Trava esta no codigo, nao nos Ajustes.</div>
-<label>Par (ex: BTC/USDT)</label><input id="par" value="BTC/USDT">
-<label>Margem USDT</label><input id="margem" value="5">
-<label>Alavancagem</label><input id="lev" value="3">
-<label>Passo (GRID_STEP)</label><input id="step" value="20">
-<div class="mut">Os Ajustes sao informativos nesta versao. Para mudar, altera as variaveis no Render.</div></div>
-</section>
-</div>
-<div class="tabs"><button class="on" onclick="show('dashboard',this)">Dashboard</button><button onclick="show('mercado',this)">Mercado</button><button onclick="show('historico',this)">Historico</button><button onclick="show('ajustes',this)">Ajustes</button></div>
-<script>
-let hist=[];let prices=[];
-function show(t,btn){document.querySelectorAll('section').forEach(s=>s.classList.remove('on'));document.getElementById('tab-'+t).classList.add('on');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('on'));btn.classList.add('on');}
-function fmt(v){return (v==null||v===undefined)?'--':Number(v).toFixed(2)}
-function fmt4(v){return (v==null)?'0.0000':Number(v).toFixed(4)}
-async function refresh(){
-  try{
-    const r=await fetch('/api/status'); if(!r.ok) throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    document.getElementById('conn').textContent='Ligado ao servidor ✓'; document.getElementById('conn').className='sub ok';
-    const price=d.price ?? d.current_price ?? 0;
-    const ref=d.ref ?? null;
-    document.getElementById('status').textContent=d.running?'A CORRER':'PARADO';
-    document.getElementById('statusline').textContent='Par: BTC/USDT:USDT | Preco atual: '+fmt(price)+' | Ref: '+fmt(ref)+' | Modo: PAPEL';
-    document.getElementById('inicial').textContent=fmt(d.initial ?? d.balance);
-    document.getElementById('atual').textContent=fmt(d.balance);
-    document.getElementById('posline').textContent='Preco agora: '+fmt(price)+' | Ref: '+fmt(ref);
-    document.getElementById('total').textContent='TOTAL AGORA: '+fmt4(d.vantagem);
-    document.getElementById('cofre_ciclo').textContent=fmt4(d.cofre_ciclo);
-    document.getElementById('cofre_global').textContent=fmt4(d.cofre_global);
-    document.getElementById('ref').textContent=fmt(ref);
-    document.getElementById('m_preco').textContent=fmt(price);
-    document.getElementById('m_ref').textContent=fmt(ref);
-    const act=d.actives||[];
-    document.getElementById('ativas').innerHTML = act.length? ('Preco atual: '+fmt(price)+'<br>'+act.map(a=>'<div>'+(a.side=='buy'?'LONG':'SHORT')+' '+fmt(a.entry)+' → '+fmt(price)+' | Bruto '+fmt4(a.gross)+' | Liquido '+fmt4(a.net)+' '+(a.armed?'🔒 TRAVA ARMADA':'')+'</div>').join('')) : ('Preco atual: '+fmt(price)+'<br>Sem posicoes ativas.');
-    const h=d.history||[];
-    document.getElementById('hist').innerHTML = h.length? ('<table><tr><th>Lado</th><th>Entrada</th><th>Saida</th><th>Lucro</th><th>Motivo</th></tr>'+h.slice(-20).reverse().map(x=>'<tr><td>'+x.side+'</td><td>'+fmt(x.entry)+'</td><td>'+fmt(x.exit)+'</td><td class="'+(x.profit>=0?'pos':'neg')+'">'+fmt4(x.profit)+'</td><td>'+x.motivo+'</td></tr>').join('')+'</table>') : 'Sem ciclos concluidos.';
-    if(price>0){prices.push(price); if(prices.length>120) prices.shift(); draw();}
-  }catch(e){ document.getElementById('conn').textContent='Sem ligacao ao servidor - verifica o Render. ('+e.message+')'; document.getElementById('conn').className='sub err'; }
+# ---------------- ESTADO ----------------
+state = {
+    "balance": PAPER_INITIAL_BALANCE,
+    "initial": PAPER_INITIAL_BALANCE,
+    "ref": None,
+    "price": None,
+    "direction": "ESTAVEL",
+    "orders": [],       # grid + espelhos
+    "history": [],      # ordens fechadas
+    "cofre_ciclo": 0.0,
+    "cofre_global": 0.0,
+    "operation_profit": 0.0,
+    "operation_active": True,
+    "ops_today": 0,
+    "updated": "",
 }
-function draw(){
-  const c=document.getElementById('chart'); const ctx=c.getContext('2d'); ctx.clearRect(0,0,c.width,c.height);
-  if(prices.length<2) return; const mn=Math.min(...prices), mx=Math.max(...prices), rng=(mx-mn)||1;
-  ctx.strokeStyle='#38bdf8'; ctx.beginPath();
-  prices.forEach((p,i)=>{const x=i/(prices.length-1)*c.width; const y=c.height-((p-mn)/rng)*(c.height-20)-10; i?ctx.lineTo(x,y):ctx.moveTo(x,y);}); ctx.stroke();
-}
-async function startBot(){ await fetch('/api/start',{method:'POST'}); refresh(); }
-async function stopBot(){ await fetch('/api/stop',{method:'POST'}); refresh(); }
-setInterval(refresh,2000); refresh();
-</script></body></html>"""
+lock = threading.Lock()
+
+exchange = None
+if not PAPER_TRADING:
+    exchange = ccxt.bybit({
+        "apiKey": os.environ.get("BYBIT_API_KEY", ""),
+        "secret": os.environ.get("BYBIT_API_SECRET", ""),
+        "options": {"defaultType": "linear"},
+    })
+    exchange.set_leverage(LEVERAGE, SYMBOL)
+else:
+    exchange = ccxt.bybit({"options": {"defaultType": "linear"}})
+
+# ---------------- HELPERS ----------------
+def fee_roundtrip(open_price, close_price, qty):
+    return FEE_RATE * (open_price + close_price) * qty
+
+def net_profit(o, price):
+    """Lucro liquido da ordem aberta o ao preco atual."""
+    if o["side"] == "LONG":
+        gross = (price - o["open_price"]) * o["qty"]
+    else:
+        gross = (o["open_price"] - price) * o["qty"]
+    return gross - fee_roundtrip(o["open_price"], price, o["qty"])
+
+def get_price():
+    try:
+        t = exchange.fetch_ticker(SYMBOL)
+        return float(t["last"])
+    except Exception:
+        return state["price"]
+
+def build_grid(ref):
+    """Grid: Ref no centro. LONG acima, SHORT abaixo. 1a ordem a step/2."""
+    orders = []
+    half = TOTAL_ORDERS // 2
+    for i in range(1, half + 1):
+        entry_long = ref + STEP / 2 + (i - 1) * STEP
+        entry_short = ref - STEP / 2 - (i - 1) * STEP
+        qty = MARGIN_PER_ORDER * LEVERAGE / entry_long
+        orders.append({"id": f"LONG_{i}", "side": "LONG", "entry": entry_long,
+                       "target": entry_long + STEP, "qty": qty,
+                       "status": "PENDING", "open_price": None,
+                       "best_gross": None, "armed": False})
+        qty_s = MARGIN_PER_ORDER * LEVERAGE / entry_short
+        orders.append({"id": f"SHORT_{i}", "side": "SHORT", "entry": entry_short,
+                       "target": entry_short - STEP, "qty": qty_s,
+                       "status": "PENDING", "open_price": None,
+                       "best_gross": None, "armed": False})
+    return orders
+
+def close_order(o, price, reason):
+    """Fecha ordem, regista lucro LIQUIDO no historico e cria espelho."""
+    gross = (price - o["open_price"]) * o["qty"] if o["side"] == "LONG" else (o["open_price"] - price) * o["qty"]
+    fee = fee_roundtrip(o["open_price"], price, o["qty"])
+    net = gross - fee
+    with lock:
+        state["balance"] += net
+        state["cofre_ciclo"] += net
+        state["operation_profit"] += net
+        state["history"].insert(0, {
+            "id": o["id"], "side": o["side"],
+            "open": o["open_price"], "close": price,
+            "profit": round(net, 6), "reason": reason,
+            "time": datetime.now().strftime("%H:%M:%S"),
+        })
+        o["status"] = "CLOSED"
+    # Espelho: fechar cria ordem oposta a um passo de distancia
+    mirror_side = "SHORT" if o["side"] == "LONG" else "LONG"
+    mirror_entry = price - STEP if mirror_side == "SHORT" else price + STEP
+    mirror_target = mirror_entry - STEP if mirror_side == "SHORT" else mirror_entry + STEP
+    qty = MARGIN_PER_ORDER * LEVERAGE / mirror_entry
+    with lock:
+        state["orders"].append({
+            "id": f"ESP_{mirror_side}_{int(price)}", "side": mirror_side,
+            "entry": mirror_entry, "target": mirror_target, "qty": qty,
+            "status": "PENDING", "open_price": None,
+            "best_gross": None, "armed": False,
+        })
+
+# ---------------- LOOP PRINCIPAL ----------------
+def loop():
+    while True:
+        try:
+            price = get_price()
+            if price is None:
+                time.sleep(2); continue
+            with lock:
+                prev = state["price"]
+                state["price"] = price
+                state["direction"] = "A SUBIR" if prev and price > prev else ("A DESCER" if prev and price < prev else "ESTAVEL")
+                state["updated"] = datetime.now().strftime("%H:%M:%S")
+                if state["ref"] is None:
+                    state["ref"] = price
+                    state["orders"] = build_grid(price)
+            # Ativar PENDING -> ACTIVE
+            for o in list(state["orders"]):
+                if o["status"] == "PENDING":
+                    hit = (price >= o["entry"]) if o["side"] == "LONG" else (price <= o["entry"])
+                    if hit:
+                        with lock:
+                            o["status"] = "ACTIVE"; o["open_price"] = price; o["best_gross"] = None; o["armed"] = False
+            # Monitorizar ACTIVE: alvo ou trava
+            for o in list(state["orders"]):
+                if o["status"] != "ACTIVE":
+                    continue
+                np = net_profit(o, price)
+                # --- TRAVA CORRIGIDA - UNICO AJUSTE: 0.002 BRUTO, RECUO ZERO ---
+                # gp = lucro BRUTO (sem descontar taxas) - e o valor que ves no ecra
+                gp = (price - o["entry"]) * o["qty"] if o["side"] == "LONG" else (o["entry"] - price) * o["qty"]
+                # 1) Arma SOMENTE com lucro BRUTO >= 0.002 (o valor que ves no ecra)
+                if not o["armed"] and gp >= TRAVA_ARMAR_BRUTO:
+                    o["armed"] = True
+                    o["best_gross"] = gp
+                # 2) Depois de armada, segue o melhor lucro BRUTO
+                if o["armed"]:
+                    if gp > o["best_gross"]:
+                        o["best_gross"] = gp
+                    # 3) Fecha quando cair 1 tick abaixo do melhor bruto - recuo ZERO
+                    if gp < o["best_gross"]:  # recuo ZERO: 1 tick contra fecha
+                        close_order(o, price, "TRAVA")
+                        continue
+                # Alvo do grid
+                hit_target = (price >= o["target"]) if o["side"] == "LONG" else (price <= o["target"])
+                if hit_target:
+                    close_order(o, price, "ALVO")
+            # Vantagem: fechar tudo e terminar operacao
+            with lock:
+                if state["operation_active"] and state["operation_profit"] >= PROFIT_PER_OPERATION:
+                    for o in list(state["orders"]):
+                        if o["status"] == "ACTIVE":
+                            close_order(o, price, "VANTAGEM")
+                    state["operation_profit"] = 0.0
+                    state["cofre_global"] += state["cofre_ciclo"]
+                    state["cofre_ciclo"] = 0.0
+                    state["ops_today"] += 1
+                    if MODE == "AUTO" and (OPS_PER_DAY == 0 or state["ops_today"] < OPS_PER_DAY):
+                        state["ref"] = price
+                        state["orders"] = build_grid(price)
+                        state["operation_active"] = True
+                    else:
+                        state["operation_active"] = False
+            time.sleep(2)
+        except Exception as e:
+            print("loop erro:", e); time.sleep(3)
+
+threading.Thread(target=loop, daemon=True).start()
+
+# ---------------- ROTAS ----------------
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    with lock:
+        s = json.loads(json.dumps(state))
+    return render_template_string("""
+    <h1>ND-SCALPING {{ 'PAPEL' if True else 'REAL' }}</h1>
+    <p>Preco: {{ s.price }} | Ref: {{ s.ref }} | Saldo: {{ s.balance }}</p>
+    <p>Lucro operacao: {{ s.operation_profit }} | Cofre ciclo: {{ s.cofre_ciclo }}</p>
+    <h2>Ordens</h2>
+    {% for o in s.orders %}<p>{{ o.id }} {{ o.side }} {{ o.status }} entrada {{ o.entry }} alvo {{ o.target }}{% if o.armed %} TRAVA ARMADA best_gross {{ o.best_gross }}{% endif %}</p>{% endfor %}
+    <h2>Historico</h2>
+    {% for h in s.history %}<p>{{ h.id }} {{ h.side }} {{ h.open }} -> {{ h.close }} {{ h.profit }} {{ h.reason }}</p>{% endfor %}
+    """, s=s)
 
-@app.route("/health")
-def health():
-    return jsonify({"ok": True, "connected": True})
-
-@app.route("/status")
-def status_alias():
-    try:
-        return jsonify(engine.get_state())
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/api/status")
-def api_status():
-    try:
-        try:
-            cur = engine.get_state().get("price") or 0
-            if not cur:
-                p = fetch_price()
-                if p and p > 0:
-                    engine.monitor(p)
-        except Exception:
-            pass
-        s = engine.get_state()
-        s["ok"] = True
-        s["connected"] = True
-        return jsonify(s)
-    except Exception as e:
-        return jsonify({"ok": False, "connected": False, "error": str(e)}), 500
-
-@app.route("/api/start", methods=["POST"])
-def api_start():
-    try:
-        p = None
-        try:
-            p = fetch_price()
-        except Exception:
-            pass
-        if not p:
-            p = engine.get_state().get("price") or 64000
-        engine.start_cycle(float(p), ref=float(p))
-        return jsonify({"ok": True, "price": p})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-@app.route("/api/stop", methods=["POST"])
-def api_stop():
-    try:
-        p = engine.get_state().get("price") or 0
-        engine.stop_cycle(float(p))
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+@app.route("/api/state")
+def api_state():
+    with lock:
+        return jsonify(state)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
