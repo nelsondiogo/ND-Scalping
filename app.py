@@ -1,206 +1,220 @@
-import logging, os, time
-from functools import wraps
-from flask import Flask, render_template_string, request, jsonify, Response
-from config import BotConfig, TOP_PAIRS
-from exchange_management import BybitExchangeManager
-from trading import MinimalistGridEngine
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-app=Flask(__name__)
-cfg=BotConfig()
-ex_manager=BybitExchangeManager(cfg)
-engine=MinimalistGridEngine(ex_manager, cfg)
-engine.start_background_loop()
-def check_auth(u,p): return u=="admin" and p==cfg.admin_password
-def requires_auth(f):
-    @wraps(f)
-    def d(*a,**k):
-        auth=request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return Response("Login necessario",401,{"WWW-Authenticate":'Basic realm="ND-Scalping"'})
-        return f(*a,**k)
-    return d
-HTML="""
-<!DOCTYPE html><html lang="pt"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ND-Scalping</title><style>
-*{box-sizing:border-box}body{font-family:-apple-system,Arial;background:#0b1220;color:#f8fafc;margin:0;padding:0;padding-bottom:70px;font-size:14px}
-.top{position:sticky;top:0;background:#0b1220;padding:12px 14px 8px;border-bottom:1px solid #1e293b;z-index:10}
-.top h1{margin:0;font-size:17px;letter-spacing:1px;color:#22c55e;display:inline}
-.badge{font-size:11px;padding:5px 10px;border-radius:20px;font-weight:700}
-.badge-paper{background:#f59e0b;color:#000}.badge-real{background:#ef4444;color:#fff}
-.tabs{position:fixed;bottom:0;left:0;right:0;z-index:50;display:flex;gap:8px;padding:10px 14px;background:#0b1220;border-top:1px solid #1e293b;justify-content:center}
-.tabs button{border:none;background:#162033;color:#94a3b8;padding:9px 13px;border-radius:20px;font-size:13px;font-weight:700;cursor:pointer}
-.tabs button.active{background:#22c55e;color:#000}
-.wrap{padding:0 14px}.card{background:#162033;border:1px solid #1e293b;border-radius:14px;padding:14px;margin-bottom:12px}
-.card h3{margin:0 0 8px;color:#38bdf8;font-size:12px;letter-spacing:1px;text-transform:uppercase}
-.big{font-size:16px;font-weight:800}.green{color:#22c55e}.red{color:#ef4444}.muted{color:#94a3b8;font-size:12px;line-height:1.5}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-label{display:block;font-size:11px;color:#38bdf8;font-weight:700;margin:12px 0 5px;text-transform:uppercase}
-input,select{width:100%;padding:11px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:#fff;font-size:14px}
-.btn{width:100%;padding:13px;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;margin-top:10px}
-.btn-start{background:#22c55e;color:#000}.btn-stop{background:#ef4444;color:#fff}.btn-blue{background:#0284c7;color:#fff}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;border-bottom:1px solid #1e293b;text-align:center}
-.page{display:none}.page.active{display:block}
-.hist-item{background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:12px;margin-bottom:8px;font-size:13px}
-.grid-wrap{display:flex;gap:0;border:1px solid #1e293b;border-radius:10px;overflow:hidden;margin-top:10px}.grid-col{flex:1;padding:12px}.grid-col.short{background:#1a0f0f}.grid-col.long{background:#0f1a0f}.grid-divider{width:3px;background:#eab308;position:relative;flex-shrink:0}.grid-divider span{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-90deg);background:#eab308;color:#000;font-weight:700;font-size:11px;padding:4px 8px;border-radius:6px;white-space:nowrap}.ref-line{border-top:2px dashed #eab308;margin:12px 0;text-align:center}.ref-line span{background:#eab308;color:#000;font-weight:700;font-size:12px;padding:3px 10px;border-radius:12px;position:relative;top:-11px}.grid-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1e293b;font-size:12px}</style></head><body>
-<div class="top"><h1>ND-SCALPING</h1> <span id="modeBadge" class="badge badge-paper">PAPEL</span><div class="muted" id="sync" style="margin-top:4px">A ligar...</div></div>
-<div class="tabs"><button class="active" onclick="showPage('dashboard',this)">Dashboard</button><button onclick="showPage('mercado',this)">Mercado</button><button onclick="showPage('historico',this)">Historico</button><button onclick="showPage('ajustes',this)">Ajustes</button></div>
-<div class="wrap">
-<div id="page-dashboard" class="page active">
-<div class="card"><h3>Status</h3><div class="big" id="statusTxt">PARADO</div><div class="muted" id="statusMsg">A aguardar...</div><div class="muted">Par: <b id="activePair">BTC/USDT:USDT</b> | Preco atual: <b id="livePrice">--</b> | Ref: <b id="refP">--</b> | Modo: <b id="modoTxt">--</b></div></div>
-<div class="row"><div class="card"><h3>Inicial</h3><div class="big green" id="equity0">--</div></div><div class="card"><h3>Atual</h3><div class="big green" id="equity">--</div></div></div>
-<div class="card"><h3>Posicao Atual - AO VIVO</h3><div class="muted">Preco agora: <b id="livePriceTop">--</b> <span id="priceArrow"></span> | Ref: <b id="refTop">--</b></div><div id="liveCards"></div><p><b>TOTAL AGORA:</b> <b id="pnlTxt">+0.0000</b> <span id="totalArrow"></span> | Cofre ciclo: <b class="green" id="cofre">0.0000</b> | Cofre global: <b class="green" id="cofreG">0.0000</b></p><p class="muted" id="vantagemTxt"></p><p class="muted">LONG ganha quando o preco SOBE. SHORT ganha quando o preco DESCE.</p></div>
-<div class="card"><h3>Grid — Ref no Centro</h3><p class="muted">Não importa a direção, o robô sempre ganha até ao lucro definido. Sobe → fecha LONG. Desce → fecha SHORT. Vai e volta → fecha dos dois lados.</p><div class="ref-line"><span id="refLine">Ref: --</span></div><div class="grid-wrap"><div class="grid-col short"><h3 style="color:#ef4444">▼ SHORT — Abaixo da Ref</h3><div id="shortCol"></div></div><div class="grid-divider"><span>REF</span></div><div class="grid-col long"><h3 style="color:#22c55e">▲ LONG — Acima da Ref</h3><div id="longCol"></div></div></div></div>
-<button class="btn btn-start" id="powerBtn" onclick="toggleBot()">INICIAR ROBO</button>
-<p class="muted">Em Papel o preco vem publico, sem precisar de API. Em Real, a API tem de estar valida no Render.</p>
-</div>
-<div id="page-mercado" class="page"><div class="card"><h3>Mercado - Grafico em tempo real</h3><div class="muted">Preco atual: <b id="livePriceChart">--</b> | Ref (entrada): <b id="refMercado">--</b></div><canvas id="priceChart" width="340" height="180" style="width:100%;height:180px;background:#0b1220;border:1px solid #1e293b;border-radius:10px;margin-top:10px"></canvas><p class="muted">Linha amarela no meio = Ref (entrada da operacao). Linha azul = preco. Ultimos ~4 minutos.</p></div><div class="card"><h3>Mercado - Posicoes Ativas</h3><div class="muted">Preco atual: <b id="livePrice2">--</b></div></div></div>
-<div id="page-historico" class="page"><div id="histList"><p class="muted">Sem ciclos concluidos.</p></div></div>
-<div id="page-ajustes" class="page"><div class="card"><h3>Ajustes - Todos os parametros aqui</h3>
-<p class="muted">A API e o Secret NAO ficam aqui. Ficam no Render em Environment Variables. Aqui mudas o par, alavancagem e margem.</p>
-<label>Par</label><select id="selected_pair">{% for p in pairs %}<option value="{{p}}" {% if p==cfg.selected_pair %}selected{% endif %}>{{p}}</option>{% endfor %}</select>
-<label>Alavancagem (1 a 20)</label><input type="number" id="leverage" value="{{cfg.leverage}}">
-<label>Margem por ordem USDT</label><input type="number" step="0.5" id="margin_per_order" value="{{cfg.margin_per_order}}">
-<label>Espaçamento Grid (em preço) - LIVRE, só não pode ser 0</label><input type="number" step="any" id="grid_step_price" value="{{ cfg.grid_step_price if cfg.grid_step_price is defined else 20 }}"><p class="muted">Escreve o passo em preço: BTC 20 | ETH 1.5 | SOL 0.15 | OP 0.0015. Ex BTC: 64500.5 → 64520 → 64540. Ex OP: 0.7515 → 0.7530 → 0.7545.</p><label>Numero total de ordens (divide-se por 2: LONG + SHORT)</label><input type="number" step="2" min="2" max="100" id="total_orders" value="{{ cfg.total_orders if cfg.total_orders is defined else 14 }}"><p class="muted" id="splitHint">14 = 7 LONG + 7 SHORT</p><p class="muted" id="stepPctHint"></p>
+# ND-SCALPING V6 Final — Trava corrigida
+# Regra da trava (so no codigo-fonte, nunca em Ajustes):
+#   - Arma SOMENTE quando o lucro LIQUIDO (bruto - taxas ida e volta) >= 0.001 USDT
+#   - Recuo = 1.5% do melhor lucro liquido atingido (best_net)
+#   - Nunca armada = nunca fecha por trava
+#   - Apos armada, fecha quando lucro liquido cair 1.5% abaixo do best_net
+# Isto acaba com "armou positiva, fechou negativa": a trava so tranca lucro real.
 
-<label>Lucro por operação (USDT) - 0 = sem fim automático</label><input type="number" step="0.1" min="0" id="lucro_por_operacao" value="{{cfg.lucro_por_operacao}}">
-<label>Modo</label><select id="modo_operacao"><option value="manual" {% if cfg.modo_operacao!='auto' %}selected{% endif %}>Manual</option><option value="auto" {% if cfg.modo_operacao=='auto' %}selected{% endif %}>Automatico</option></select>
-<label>Operações por dia (Auto) - 0 = sem limite</label><input type="number" id="operacoes_por_dia" value="{{cfg.operacoes_por_dia}}" min="0" max="50">
-<button class="btn btn-blue" onclick="saveSettings()">Guardar Definicoes</button>
-<p class="muted">Saldo real: com Margem 5 precisas de 15 USDT minimo em Futuros (2 ordens x 5). Ideal: 50 USDT. Se so tens 5 USDT, usa Margem 1.0.</p>
-</div></div>
-</div>
-<script>
-function showPage(n,btn){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+n).classList.add('active');document.querySelectorAll('.tabs button').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
-async function saveSettings(){const p={selected_pair:document.getElementById('selected_pair').value,leverage:parseInt(document.getElementById('leverage').value),margin_per_order:parseFloat(document.getElementById('margin_per_order').value),grid_step_price:parseFloat(document.getElementById('grid_step_price').value),total_orders:parseInt(document.getElementById('total_orders').value),lucro_por_operacao:parseFloat(document.getElementById('lucro_por_operacao').value),modo_operacao:document.getElementById('modo_operacao').value,operacoes_por_dia:parseInt(document.getElementById('operacoes_por_dia').value)};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});alert(r.ok?'Guardado!':'Erro ao guardar');}
-async function controlBot(a){const r=await fetch('/api/'+a,{method:'POST'});const d=await r.json();alert(a==='start'?'A iniciar... aguarda 5s e ve o Dashboard. Se ficar PARADO, le a mensagem de Status.':'Parado.');updateStatus()}
-function fmtQ(q){if(q==null)return '--';var s=Number(q).toFixed(8);return s.replace(/\.?0+$/,'')||'0';}
-function fmtP(p){if(!p&&p!==0)return '--';if(p<1)return p.toFixed(4);if(p<10)return p.toFixed(3);return p.toFixed(2);}
-let _running=false;async function toggleBot(){await controlBot(_running?'stop':'start');}
-var _chartPts=[];var _chartRef=0;
-function drawChart(){var cv=document.getElementById('priceChart');if(!cv)return;var ctx=cv.getContext('2d');var W=cv.width,H=cv.height;ctx.clearRect(0,0,W,H);var pts=_chartPts;if(pts.length<2){ctx.fillStyle='#94a3b8';ctx.font='12px Arial';ctx.fillText('A aguardar preco...',10,20);return;}var ref=_chartRef||pts[0].p;var half=0;for(var i=0;i<pts.length;i++){var dd=Math.abs(pts[i].p-ref);if(dd>half)half=dd;}if(half<=0)half=1;half*=1.15;var midY=H/2;function yOf(p){return midY-((p-ref)/half)*(H/2-10);}ctx.strokeStyle='#eab308';ctx.setLineDash([6,4]);ctx.beginPath();ctx.moveTo(0,midY);ctx.lineTo(W,midY);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#eab308';ctx.font='bold 11px Arial';ctx.fillText('Ref '+ref.toFixed(2),6,midY-6);ctx.strokeStyle='#38bdf8';ctx.lineWidth=2;ctx.beginPath();for(var i=0;i<pts.length;i++){var x=i/119*W;var y=yOf(pts[i].p);if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.stroke();ctx.lineWidth=1;var lx=(pts.length-1)/119*W,ly=yOf(pts[pts.length-1].p);ctx.fillStyle='#22c55e';ctx.beginPath();ctx.arc(lx,ly,3.5,0,6.283);ctx.fill();}
-async function updateStatus(){try{const r=await fetch('/api/status');const d=await r.json();document.getElementById('sync').innerText='Atualizado: '+new Date().toLocaleTimeString('pt-PT');document.getElementById('equity').innerText=(d.equity||0).toFixed(2)+' USDT';document.getElementById('equity0').innerText=(d.cycle_equity||d.equity||0).toFixed(2)+' USDT';document.getElementById('statusMsg').innerText=d.status_message;document.getElementById('statusTxt').innerText=d.is_running?'OPERANDO':'PARADO';document.getElementById('statusTxt').className='big '+(d.is_running?'green':'red');_running=!!d.is_running;var pb=document.getElementById('powerBtn');if(pb){pb.innerText=d.is_running?'PARAR ROBO':'INICIAR ROBO';pb.className='btn '+(d.is_running?'btn-stop':'btn-start');}document.getElementById('activePair').innerText=d.active_symbol||d.selected_pair||'BTC/USDT:USDT';document.getElementById('pnlTxt').innerText=(d.net_pnl>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('cofre').innerText=(d.cofre||0).toFixed(4)+' USDT';document.getElementById('cofreG').innerText=(d.cofre_global||0).toFixed(4)+' USDT';var _vt=document.getElementById('vantagemTxt');if(_vt){if(d.lucro_por_operacao>0){_vt.innerText='Vantagem: '+((d.vantagem||0)>=0?'+':'')+(d.vantagem||0).toFixed(4)+' / '+Number(d.lucro_por_operacao).toFixed(2)+' USDT'+(d.bloquear_novas?' • Sem novas ordens':'');_vt.style.color=(d.vantagem||0)>=Number(d.lucro_por_operacao)?'#22c55e':'#94a3b8';}else{_vt.innerText='';}}var _mt=document.getElementById('modoTxt');if(_mt){_mt.innerText=(d.modo_operacao==='auto'?'Automatico':'Manual')+(d.modo_operacao==='auto'&&d.operacoes_por_dia>0?' ('+d.completed_operations+'/'+d.operacoes_por_dia+')':'');}var _rm=document.getElementById('refMercado');if(_rm){_rm.innerText=d.reference_price?d.reference_price.toFixed(2):'--';}var _lc=document.getElementById('livePriceChart');if(_lc){_lc.innerText=d.last_price?d.last_price.toFixed(2):'--';}document.getElementById('refP').innerText=d.reference_price?d.reference_price.toFixed(2):'--';document.getElementById('livePrice').innerText=d.last_price?d.last_price.toFixed(2):(d.reference_price?d.reference_price.toFixed(2):'--');document.getElementById('livePrice2').innerText=d.last_price?d.last_price.toFixed(2):'--';const b=document.getElementById('modeBadge');if(d.paper_trading){b.innerText='PAPEL';b.className='badge badge-paper';}else{b.innerText='REAL';b.className='badge badge-real';}document.getElementById('livePriceTop').innerText=d.last_price?fmtP(d.last_price):'--';document.getElementById('refTop').innerText=d.reference_price?fmtP(d.reference_price):'--';document.getElementById('priceArrow').innerText=d.price_dir==='up'?'▲ A SUBIR':(d.price_dir==='down'?'▼ A DESCER':'— ESTAVEL');document.getElementById('priceArrow').style.color=d.price_dir==='up'?'#22c55e':(d.price_dir==='down'?'#ef4444':'#94a3b8');document.getElementById('pnlTxt').innerText=((d.net_pnl||0)>=0?'+':'')+(d.net_pnl||0).toFixed(4);document.getElementById('pnlTxt').style.color=(d.net_pnl||0)>0?'#22c55e':((d.net_pnl||0)<0?'#ef4444':'#94a3b8');document.getElementById('liveCards').innerHTML=(d.live_orders||[]).map(o=>{const p=o.pnl_live||0;const col=p>0?'#22c55e':(p<0?'#ef4444':'#94a3b8');const nome=o.side==='buy'?'LONG':'SHORT';const verbo=o.side==='buy'?(d.price_dir==='up'?'a ganhar porque o preco SOBE':(d.price_dir==='down'?'a perder porque o preco DESCE':'estavel')):(d.price_dir==='down'?'a ganhar porque o preco DESCE':(d.price_dir==='up'?'a perder porque o preco SOBE':'estavel'));return `<div style="background:#0b1220;border:1px solid #1e293b;border-radius:12px;padding:10px;margin-top:8px"><b>${nome}</b> Entrada ${fmtP(o.entry_price)} Qty ${fmtQ(o.qty)}<br><b style="color:${col}">${p>0?'+':''}${p.toFixed(4)} USDT ${p>0?'▲ POSITIVO':(p<0?'▼ NEGATIVO':'— NEUTRO')}</b></div>`;}).join('')||'';
-var _hlist=(d.history||[]);var _orders=_hlist.filter(function(h){return !h.ciclo;});var _lo=_orders.filter(function(h){return h.side==='buy';});var _sh=_orders.filter(function(h){return h.side==='sell';});var _tl=_lo.reduce(function(s,h){return s+Number(h.profit||0);},0);var _ts=_sh.reduce(function(s,h){return s+Number(h.profit||0);},0);var _tot=_tl+_ts;var _rows=_orders.slice().reverse().slice(0,50).map(function(h){var _p=Number(h.profit||0);var _c=_p>=0?'#22c55e':'#ef4444';var _nm=h.side==='buy'?'LONG':'SHORT';return '<div style="border-top:1px solid #1e293b;padding:6px 0;font-size:12px"><b>'+_nm+'</b> '+Number(h.entry||0).toFixed(2)+' → '+Number(h.close||0).toFixed(2)+' <b style="color:'+_c+'">'+(_p>=0?'+':'')+_p.toFixed(4)+' USDT</b> <span style="color:#94a3b8">'+(h.reason||'')+'</span></div>';}).join('');document.getElementById('histList').innerHTML='<div class=card><h3>Total fechado: '+(_tot>=0?'+':'')+_tot.toFixed(4)+' USDT | '+_orders.length+' ordens</h3><p>LONG: '+(_tl>=0?'+':'')+_tl.toFixed(4)+' USDT | '+_lo.length+' ordens</p><p>SHORT: '+(_ts>=0?'+':'')+_ts.toFixed(4)+' USDT | '+_sh.length+' ordens</p>'+(_rows==='' ?'<p class=muted>Sem ordens fechadas.</p>' :'<div>'+_rows+'</div>')+'</div>';
-try{var _to=document.getElementById('total_orders');if(_to){var _v=parseInt(_to.value)||14;var _h=document.getElementById('splitHint');if(_h)_h.innerText=_v+' = '+Math.floor(_v/2)+' LONG + '+Math.floor(_v/2)+' SHORT';}var _sp=document.getElementById('stepPctHint');var _si=document.getElementById('grid_step_price');if(_sp&&_si&&d.last_price){var _sv=parseFloat(_si.value)||0;_sp.innerText='Passo '+_sv+' = '+(_sv/Number(d.last_price)*100).toFixed(4)+'% do preco atual ('+fmtP(d.last_price)+') | 1a ordem a '+(_sv/2)+' da Ref';}}catch(e){}try{if(d.last_price){_chartPts.push({p:Number(d.last_price)});if(_chartPts.length>120)_chartPts.shift();if(d.reference_price)_chartRef=Number(d.reference_price);drawChart();}}catch(e){}try{renderGrid(d)}catch(e){console.log('grid',e)}}catch(e){document.getElementById('sync').innerText='Sem ligacao ao servidor - verifica o Render.';}}
-function renderGrid(d){try{var refEl=document.getElementById('refLine');if(refEl){refEl.innerText='— Ref: '+(d.reference_price?Number(d.reference_price).toFixed(4):'--')+' • Preço: '+(d.last_price?Number(d.last_price).toFixed(2):'--')+' —';}var orders=Array.isArray(d.orders)?d.orders:[];var longs=orders.filter(function(o){return o.side==='buy'}).sort(function(a,b){return a.entry_price-b.entry_price});var shorts=orders.filter(function(o){return o.side==='sell'}).sort(function(a,b){return b.entry_price-a.entry_price});function fmt(o){var tgt=(o.target_price!=null)?Number(o.target_price).toFixed(4):'--';var tp=(o.target_profit!=null)?Number(o.target_profit).toFixed(4):'0.0100';var cls=o.status==='PENDING'?'yellow':(o.status==='ACTIVE'?'green':'red');return '<div class="grid-row"><span>'+String(o.id).replace('GRID_','')+' • '+Number(o.entry_price).toFixed(4)+' → '+tgt+'</span><span class="'+cls+'">'+o.status+' • +'+tp+'</span></div>';}var lc=document.getElementById('longCol');if(lc){lc.innerHTML=longs.length?longs.map(fmt).join(''):'<p class="muted">Sem LONG</p>';}var sc=document.getElementById('shortCol');if(sc){sc.innerHTML=shorts.length?shorts.map(fmt).join(''):'<p class="muted">Sem SHORT</p>';}}catch(e){console.log('grid',e)}}
-setInterval(updateStatus,2000);updateStatus();
-</script></body></html>
-"""
-@app.route("/")
-@requires_auth
-def index(): return render_template_string(HTML, cfg=cfg, pairs=TOP_PAIRS)
-@app.route("/api/settings", methods=["POST"])
-@requires_auth
-def update_settings():
-    # V5 - Ajustes LIVRES para quem esta a operar. Sem barreiras. Unica regra: espacamento != 0.
-    try:
-        d=request.json or {}
-        if "selected_pair" in d and d["selected_pair"] in TOP_PAIRS:
-            _np=d["selected_pair"]; cfg.selected_pair=_np
-            if cfg.is_running and cfg.active_symbol and cfg.active_symbol!=_np:
-                try: engine.switch_pair(_np)
-                except Exception as _e: print("switch err", _e)
-        if "leverage" in d:
-            try: cfg.leverage=int(d["leverage"])
-            except Exception: pass
-        if "margin_per_order" in d:
-            try: cfg.margin_per_order=float(d["margin_per_order"])
-            except Exception: pass
-        if "grid_step_price" in d:
-            v=float(d["grid_step_price"])
-            if v==0: return jsonify({"status":"error","error":"Espacamento nao pode ser 0"}),400
-            cfg.grid_step_price=abs(v)
-        if "total_orders" in d:
-            try:
-                _t=int(d["total_orders"])
-                if _t>=2: cfg.total_orders=_t
-            except Exception: pass
-        if "trailing_offset_pct" in d:
-            try: cfg.trailing_offset_pct=float(d["trailing_offset_pct"])
-            except Exception: pass
-        if "lucro_por_operacao" in d:
-            try: cfg.lucro_por_operacao=max(0.0,float(d["lucro_por_operacao"]))
-            except Exception: pass
-        if "modo_operacao" in d and d["modo_operacao"] in ("manual","auto"): cfg.modo_operacao=d["modo_operacao"]
-        if "operacoes_por_dia" in d:
-            try: cfg.operacoes_por_dia=max(0,int(d["operacoes_por_dia"]))
-            except Exception: pass
-        return jsonify({"status":"ok"})
-    except Exception as e: return jsonify({"status":"error","error":str(e)}),400
-def switch_pair():
-    try:
-        d=request.json or {}
-        npair=d.get("selected_pair") or d.get("pair")
-        if npair not in TOP_PAIRS: return jsonify({"status":"error","error":"par invalido"}),400
-        res=engine.switch_pair(npair)
-        return jsonify({"status":"ok","result":res,"active":cfg.active_symbol})
-    except Exception as e: return jsonify({"status":"error","error":str(e)}),400
+import os, time, threading, json
+from datetime import datetime
+from flask import Flask, jsonify, request, render_template_string
+import ccxt
 
-@app.route("/api/start", methods=["POST"])
-@requires_auth
-def start(): engine.start_bot(); return jsonify({"status":"started","message":cfg.status_message})
-@app.route("/api/stop", methods=["POST"])
-@requires_auth
-def stop(): engine.stop_bot(close_all=True); return jsonify({"status":"stopped"})
-@app.route("/api/status")
-@requires_auth
-def status():
-    # V5 WATCHDOG: se o motor esta a correr mas o loop de fundo esta parado ha +5s (Render Free dorme),
-    # o proprio pedido do Dashboard (de 2 em 2s) da o tick. O preco a passar uma entrada REAGE na hora.
-    try:
-        if cfg.is_running and (time.time()-getattr(engine,"last_tick_time",0)>5):
-            engine.tick()
-    except Exception as _e: print("watchdog tick", _e)
-    # FIX ESTATICO: busca preco FRESCO a cada pedido, nao usa last_price parado
-    _sym = cfg.active_symbol or cfg.selected_pair
-    last_price = 0
-    ticker_err = ""
-    try:
-        _t = ex_manager.fetch_ticker(_sym)
-        last_price = float(_t.get("last",0) or 0)
-        if last_price>0:
-            engine.prev_price = engine.last_price if getattr(engine,"last_price",0)>0 else last_price
-            engine.last_price = last_price
-    except Exception as e:
-        ticker_err = str(e)
-        last_price = getattr(engine,"last_price",0) or engine.reference_price or 0
-    if False:
-        try:
-            t=ex_manager.fetch_ticker(cfg.selected_pair)
-            last_price=float(t.get("last",0) or 0)
-            engine.last_price=last_price
-        except Exception: last_price=0
-    if getattr(cfg,'paper_trading',False):
-        equity=engine.paper_equity if engine.paper_equity>0 else cfg.paper_initial_balance
+app = Flask(__name__)
+
+# ---------------- CONFIG ----------------
+SYMBOL = os.environ.get("SYMBOL", "BTC/USDT:USDT")
+PAPER_TRADING = os.environ.get("PAPER_TRADING", "True") == "True"
+PAPER_INITIAL_BALANCE = float(os.environ.get("PAPER_INITIAL_BALANCE", "1000.0"))
+MARGIN_PER_ORDER = float(os.environ.get("MARGIN_PER_ORDER", "5.0"))
+LEVERAGE = int(os.environ.get("LEVERAGE", "3"))
+STEP = float(os.environ.get("STEP", "40.0"))          # passo em preco (BTC 40)
+TOTAL_ORDERS = int(os.environ.get("TOTAL_ORDERS", "14"))  # 7 LONG + 7 SHORT
+PROFIT_PER_OPERATION = float(os.environ.get("PROFIT_PER_OPERATION", "0.05"))  # USDT
+MODE = os.environ.get("MODE", "MANUAL")  # MANUAL | AUTO
+OPS_PER_DAY = int(os.environ.get("OPS_PER_DAY", "0"))  # 0 = sem limite
+
+# Trava de seguranca — FIXA no codigo
+TRAVA_ARM_NET = 0.001      # arma quando lucro liquido >= 0.001 USDT
+TRAVA_RECUO_FRAC = 0.015   # recuo de 1.5% do melhor lucro liquido
+FEE_RATE = 0.0001          # maker Bybit (papel)
+
+# ---------------- ESTADO ----------------
+state = {
+    "balance": PAPER_INITIAL_BALANCE,
+    "initial": PAPER_INITIAL_BALANCE,
+    "ref": None,
+    "price": None,
+    "direction": "ESTAVEL",
+    "orders": [],       # grid + espelhos
+    "history": [],      # ordens fechadas
+    "cofre_ciclo": 0.0,
+    "cofre_global": 0.0,
+    "operation_profit": 0.0,
+    "operation_active": True,
+    "ops_today": 0,
+    "updated": "",
+}
+lock = threading.Lock()
+
+exchange = None
+if not PAPER_TRADING:
+    exchange = ccxt.bybit({
+        "apiKey": os.environ.get("BYBIT_API_KEY", ""),
+        "secret": os.environ.get("BYBIT_API_SECRET", ""),
+        "options": {"defaultType": "linear"},
+    })
+    exchange.set_leverage(LEVERAGE, SYMBOL)
+else:
+    exchange = ccxt.bybit({"options": {"defaultType": "linear"}})
+
+# ---------------- HELPERS ----------------
+def fee_roundtrip(open_price, close_price, qty):
+    return FEE_RATE * (open_price + close_price) * qty
+
+def net_profit(o, price):
+    """Lucro liquido da ordem aberta o ao preco atual."""
+    if o["side"] == "LONG":
+        gross = (price - o["open_price"]) * o["qty"]
     else:
-        equity=ex_manager.get_total_equity()
-        if equity<0: equity=0
-    # PNL vivo com preco fresco
-    live_orders=[]; live_total=0.0
-    for _o in (engine.orders_state or []):
-        if _o.get("status")!="ACTIVE": continue
-        _pnl = ((_o["entry_price"]-last_price) if _o.get("side")=="sell" else (last_price-_o["entry_price"]))*float(_o.get("qty",0))
-        live_total+=_pnl
-        _oo=dict(_o); _oo["pnl_live"]=round(_pnl,4); _oo["price_now"]=last_price; _oo["is_profit"]=_pnl>0
-        live_orders.append(_oo)
-    live_total=round(live_total,4)
-    if getattr(cfg,'paper_trading',False):
-        equity=(cfg.cycle_initial_equity or cfg.paper_initial_balance)+cfg.cofre+live_total
-    # TOTAL AGORA = fechadas (Cofre) + flutuante
-    net=(equity-cfg.cycle_initial_equity) if (cfg.is_running and cfg.cycle_initial_equity>0) else 0.0
-    price_dir="flat"
-    if getattr(engine,"last_price",0) and getattr(engine,"prev_price",0):
-        price_dir="up" if engine.last_price>engine.prev_price else ("down" if engine.last_price<engine.prev_price else "flat")
-    try: _vant=engine._vantagem(cfg.active_symbol or cfg.selected_pair, last_price)
-    except Exception: _vant=cfg.cofre
-    return jsonify({"is_running":cfg.is_running,"active_symbol":cfg.active_symbol,"selected_pair":cfg.selected_pair,"equity":equity,"cycle_equity":cfg.cycle_initial_equity,"live_orders":live_orders,"live_total":live_total,"price_dir":price_dir,"tick_age":round(time.time()-getattr(engine,"last_tick_time",0),1),
-        "vantagem":round(_vant,4),"lucro_por_operacao":getattr(cfg,"lucro_por_operacao",0),"modo_operacao":getattr(cfg,"modo_operacao","manual"),"operacoes_por_dia":getattr(cfg,"operacoes_por_dia",0),"bloquear_novas":getattr(engine,"bloquear_novas",False),
-        "net_pnl":net,"completed_operations":cfg.completed_operations,"max_auto_operations":cfg.max_auto_operations,
-        "auto_mode":cfg.auto_mode,"status_message":cfg.status_message,"orders":engine.orders_state,
-        "cofre":cfg.cofre,"cofre_global":cfg.cofre_global,"reference_price":engine.reference_price,"last_price":last_price,
-        "paper_trading":cfg.paper_trading,"paper_equity":engine.paper_equity,"history":getattr(engine,"history",[]),
-        "leverage":cfg.leverage,"total_orders":cfg.total_orders,"per_side":getattr(engine,"per_side",7),"first_dist":getattr(engine,"first_dist",0),"grid_step":getattr(engine,"grid_step",cfg.grid_step_price),"margin_per_order":cfg.margin_per_order,"ticker_err":ticker_err})
+        gross = (o["open_price"] - price) * o["qty"]
+    return gross - fee_roundtrip(o["open_price"], price, o["qty"])
+
+def get_price():
+    try:
+        t = exchange.fetch_ticker(SYMBOL)
+        return float(t["last"])
+    except Exception:
+        return state["price"]
+
+def build_grid(ref):
+    """Grid: Ref no centro. LONG acima, SHORT abaixo. 1a ordem a step/2."""
+    orders = []
+    half = TOTAL_ORDERS // 2
+    for i in range(1, half + 1):
+        entry_long = ref + STEP / 2 + (i - 1) * STEP
+        entry_short = ref - STEP / 2 - (i - 1) * STEP
+        qty = MARGIN_PER_ORDER * LEVERAGE / entry_long
+        orders.append({"id": f"LONG_{i}", "side": "LONG", "entry": entry_long,
+                       "target": entry_long + STEP, "qty": qty,
+                       "status": "PENDING", "open_price": None,
+                       "best_net": None, "armed": False})
+        qty_s = MARGIN_PER_ORDER * LEVERAGE / entry_short
+        orders.append({"id": f"SHORT_{i}", "side": "SHORT", "entry": entry_short,
+                       "target": entry_short - STEP, "qty": qty_s,
+                       "status": "PENDING", "open_price": None,
+                       "best_net": None, "armed": False})
+    return orders
+
+def close_order(o, price, reason):
+    """Fecha ordem, regista lucro LIQUIDO no historico e cria espelho."""
+    gross = (price - o["open_price"]) * o["qty"] if o["side"] == "LONG" else (o["open_price"] - price) * o["qty"]
+    fee = fee_roundtrip(o["open_price"], price, o["qty"])
+    net = gross - fee
+    with lock:
+        state["balance"] += net
+        state["cofre_ciclo"] += net
+        state["operation_profit"] += net
+        state["history"].insert(0, {
+            "id": o["id"], "side": o["side"],
+            "open": o["open_price"], "close": price,
+            "profit": round(net, 6), "reason": reason,
+            "time": datetime.now().strftime("%H:%M:%S"),
+        })
+        o["status"] = "CLOSED"
+    # Espelho: fechar cria ordem oposta a um passo de distancia
+    mirror_side = "SHORT" if o["side"] == "LONG" else "LONG"
+    mirror_entry = price - STEP if mirror_side == "SHORT" else price + STEP
+    mirror_target = mirror_entry - STEP if mirror_side == "SHORT" else mirror_entry + STEP
+    qty = MARGIN_PER_ORDER * LEVERAGE / mirror_entry
+    with lock:
+        state["orders"].append({
+            "id": f"ESP_{mirror_side}_{int(price)}", "side": mirror_side,
+            "entry": mirror_entry, "target": mirror_target, "qty": qty,
+            "status": "PENDING", "open_price": None,
+            "best_net": None, "armed": False,
+        })
+
+# ---------------- LOOP PRINCIPAL ----------------
+def loop():
+    while True:
+        try:
+            price = get_price()
+            if price is None:
+                time.sleep(2); continue
+            with lock:
+                prev = state["price"]
+                state["price"] = price
+                state["direction"] = "A SUBIR" if prev and price > prev else ("A DESCER" if prev and price < prev else "ESTAVEL")
+                state["updated"] = datetime.now().strftime("%H:%M:%S")
+                if state["ref"] is None:
+                    state["ref"] = price
+                    state["orders"] = build_grid(price)
+            # Ativar PENDING -> ACTIVE
+            for o in list(state["orders"]):
+                if o["status"] == "PENDING":
+                    hit = (price >= o["entry"]) if o["side"] == "LONG" else (price <= o["entry"])
+                    if hit:
+                        with lock:
+                            o["status"] = "ACTIVE"; o["open_price"] = price; o["best_net"] = None; o["armed"] = False
+            # Monitorizar ACTIVE: alvo ou trava
+            for o in list(state["orders"]):
+                if o["status"] != "ACTIVE":
+                    continue
+                np = net_profit(o, price)
+                # --- TRAVA CORRIGIDA ---
+                # 1) Arma SOMENTE com lucro liquido >= 0.001 (nunca no bruto!)
+                if not o["armed"] and np >= TRAVA_ARM_NET:
+                    o["armed"] = True
+                    o["best_net"] = np
+                # 2) Depois de armada, segue o melhor lucro liquido
+                if o["armed"]:
+                    if np > o["best_net"]:
+                        o["best_net"] = np
+                    # 3) Fecha quando cair 1.5% abaixo do melhor lucro
+                    if np <= o["best_net"] * (1 - TRAVA_RECUO_FRAC):
+                        close_order(o, price, "TRAVA")
+                        continue
+                # Alvo do grid
+                hit_target = (price >= o["target"]) if o["side"] == "LONG" else (price <= o["target"])
+                if hit_target:
+                    close_order(o, price, "ALVO")
+            # Vantagem: fechar tudo e terminar operacao
+            with lock:
+                if state["operation_active"] and state["operation_profit"] >= PROFIT_PER_OPERATION:
+                    for o in list(state["orders"]):
+                        if o["status"] == "ACTIVE":
+                            close_order(o, price, "VANTAGEM")
+                    state["operation_profit"] = 0.0
+                    state["cofre_global"] += state["cofre_ciclo"]
+                    state["cofre_ciclo"] = 0.0
+                    state["ops_today"] += 1
+                    if MODE == "AUTO" and (OPS_PER_DAY == 0 or state["ops_today"] < OPS_PER_DAY):
+                        state["ref"] = price
+                        state["orders"] = build_grid(price)
+                        state["operation_active"] = True
+                    else:
+                        state["operation_active"] = False
+            time.sleep(2)
+        except Exception as e:
+            print("loop erro:", e); time.sleep(3)
+
+threading.Thread(target=loop, daemon=True).start()
+
+# ---------------- ROTAS ----------------
 @app.route("/health")
-def health(): return jsonify({"status":"ok"})
-if __name__=="__main__":
-    port=int(os.getenv("PORT","5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+def health():
+    return jsonify({"ok": True})
+
+@app.route("/")
+def index():
+    with lock:
+        s = json.loads(json.dumps(state))
+    return render_template_string("""
+    <h1>ND-SCALPING {{ 'PAPEL' if True else 'REAL' }}</h1>
+    <p>Preco: {{ s.price }} | Ref: {{ s.ref }} | Saldo: {{ s.balance }}</p>
+    <p>Lucro operacao: {{ s.operation_profit }} | Cofre ciclo: {{ s.cofre_ciclo }}</p>
+    <h2>Ordens</h2>
+    {% for o in s.orders %}<p>{{ o.id }} {{ o.side }} {{ o.status }} entrada {{ o.entry }} alvo {{ o.target }}{% if o.armed %} TRAVA ARMADA best_net {{ o.best_net }}{% endif %}</p>{% endfor %}
+    <h2>Historico</h2>
+    {% for h in s.history %}<p>{{ h.id }} {{ h.side }} {{ h.open }} -> {{ h.close }} {{ h.profit }} {{ h.reason }}</p>{% endfor %}
+    """, s=s)
+
+@app.route("/api/state")
+def api_state():
+    with lock:
+        return jsonify(state)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
