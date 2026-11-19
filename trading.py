@@ -2,6 +2,12 @@ import time, threading, logging, json, os
 from config import TOP_PAIRS
 logger = logging.getLogger("ND-Trading")
 STATE_FILE = "state.json"
+# TRAVA DE SEGURANCA - codigo fonte, NUNCA em Ajustes. Sempre ligada.
+# Quando a ordem ja cobre as taxas + TRAVA_MIN_NET, a trava arma e o stop dinamico
+# segue o melhor preco (nunca desce). Se o preco recuar ate ao stop, fecha ainda
+# positiva, mesmo sem atingir o alvo. Ordens que nunca armam comportam-se como antes.
+TRAVA_MIN_NET = 0.002      # USDT liquido minimo trancado por ordem
+TRAVA_TRAIL_FRAC = 0.4     # stop segue a 40% do passo atras do melhor preco
 
 class MinimalistGridEngine:
     def __init__(self, exchange_manager, config):
@@ -302,8 +308,26 @@ class MinimalistGridEngine:
         _tgt = float(slot["target_price"])
         _lvl = slot.get("grid_level", "?")
         _open = float(slot.get("open_price", slot["entry_price"]))
+        _qty = float(slot.get("qty", 0) or 0)
+        # TRAVA: atualiza o melhor preco a favor - nunca volta atras.
         if slot["side"]=="buy":
-            if current_price >= _tgt:
+            if current_price > float(slot.get("best_price", _open)): slot["best_price"]=current_price
+        else:
+            if current_price < float(slot.get("best_price", _open)): slot["best_price"]=current_price
+        # TRAVA: arma quando a ordem ja cobre as taxas + TRAVA_MIN_NET.
+        _rate = self._fee_rate()
+        _fee_rt = 2*_rate*_open*_qty  # taxas ida+volta (aprox)
+        _lock_move = (_fee_rt + TRAVA_MIN_NET)/_qty if _qty>0 else 0
+        _step_t = float(slot.get("grid_step", 0) or getattr(self, "grid_step", 0) or self.cfg.grid_step_price or 0)
+        if _step_t<=0: _step_t=20.0
+        _trail = _step_t*TRAVA_TRAIL_FRAC
+        _best = float(slot.get("best_price", _open))
+        if slot["side"]=="buy":
+            _locked = _open + _lock_move
+            _stop = max(_locked, _best - _trail)
+            _hit_trava = (_best > _locked) and (current_price <= _stop)
+            _hit_alvo = current_price >= _tgt
+            if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
                 if not closed: return
                 _gross = (current_price-_open)*slot["qty"]
@@ -312,14 +336,19 @@ class MinimalistGridEngine:
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_long_pnl+=_profit
-                    self.closed_orders.append({"time":int(time.time()),"side":"buy","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":f"GRID V6 LONG {_lvl}"})
+                    _rsn = (f"TRAVA LONG {_lvl}" if (_hit_trava and not _hit_alvo) else f"GRID V6 LONG {_lvl}")
+                    self.closed_orders.append({"time":int(time.time()),"side":"buy","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":_rsn})
                 except Exception: pass
                 self._spawn_mirror(symbol, "sell", current_price)  # V6 espelho: SHORT 1 passo abaixo do fecho
                 slot["status"]="CLOSED"
                 self.orders_state=[o for o in self.orders_state if not (o.get("id")==slot.get("id") and o.get("status")=="CLOSED")]
                 return
         else:
-            if current_price <= _tgt:
+            _locked = _open - _lock_move
+            _stop = min(_locked, _best + _trail)
+            _hit_trava = (_best < _locked) and (current_price >= _stop)
+            _hit_alvo = current_price <= _tgt
+            if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
                 if not closed: return
                 _gross = (_open-current_price)*slot["qty"]
@@ -328,7 +357,8 @@ class MinimalistGridEngine:
                 self.cfg.cofre+=_profit
                 try:
                     self.hist_short_pnl+=_profit
-                    self.closed_orders.append({"time":int(time.time()),"side":"sell","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":f"GRID V6 SHORT {_lvl}"})
+                    _rsn = (f"TRAVA SHORT {_lvl}" if (_hit_trava and not _hit_alvo) else f"GRID V6 SHORT {_lvl}")
+                    self.closed_orders.append({"time":int(time.time()),"side":"sell","entry":round(_open,8),"close":round(current_price,8),"profit":round(_profit,6),"gross":round(_gross,6),"fee":round(_fee,6),"reason":_rsn})
                 except Exception: pass
                 self._spawn_mirror(symbol, "buy", current_price)  # V6 espelho: LONG 1 passo acima do fecho
                 slot["status"]="CLOSED"
