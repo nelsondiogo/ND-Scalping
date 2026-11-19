@@ -48,7 +48,7 @@ class MinimalistGridEngine:
         pnl=0.0
         for o in self.orders_state:
             if o["status"]!="ACTIVE": continue
-            _op=float(o.get("open_price", o["entry_price"]))
+            _op=float(o["entry_price"])
             if o["side"]=="buy": pnl += (current_price - _op)*o["qty"]
             else: pnl += (_op - current_price)*o["qty"]
         return self.cfg.cycle_initial_equity + self.cfg.cofre + pnl
@@ -57,7 +57,7 @@ class MinimalistGridEngine:
             pnl=0.0
             for o in self.orders_state:
                 if o["status"]!="ACTIVE": continue
-                _op=float(o.get("open_price", o["entry_price"]))
+                _op=float(o["entry_price"])
                 if o["side"]=="buy": pnl += (current_price - _op)*o["qty"]
                 else: pnl += (_op - current_price)*o["qty"]
             return pnl
@@ -252,28 +252,29 @@ class MinimalistGridEngine:
                 o=self._place(symbol,"buy",slot["qty"],current_price,position_idx=1)
                 if not o: return
                 slot["status"]="ACTIVE"
-                slot["open_price"]=current_price
+                slot["open_price"]=float(slot["entry_price"])
                 slot["best_net"]=0.0
                 _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
-                slot["target_price"]=round(current_price+_stp,8)
+                slot["target_price"]=round(float(slot["entry_price"])+_stp,8)
                 return
             if slot["side"]=="sell" and current_price <= slot["entry_price"]:
                 o=self._place(symbol,"sell",slot["qty"],current_price,position_idx=2)
                 if not o: return
                 slot["status"]="ACTIVE"
-                slot["open_price"]=current_price
+                slot["open_price"]=float(slot["entry_price"])
                 slot["best_net"]=0.0
                 _stp=float(slot.get("grid_step",0) or getattr(self,"grid_step",0) or self.cfg.grid_step_price)
-                slot["target_price"]=round(current_price-_stp,8)
+                slot["target_price"]=round(float(slot["entry_price"])-_stp,8)
                 return
             return
         if slot["status"]!="ACTIVE":
             return
         _tgt = float(slot["target_price"])
         _lvl = slot.get("grid_level", "?")
-        _open = float(slot.get("open_price", slot["entry_price"]))
+        _open = float(slot["entry_price"])
+        slot["open_price"] = _open
         _qty = float(slot.get("qty", 0) or 0)
-        # TRAVA RIGIDA: arma a 0.002 BRUTO, recuo ZERO, 1 tick contra fecha
+        # TRAVA RIGIDA: usa entry_price = o que o ecra mostra. open_price antigo era o preco do tick e nunca armava.: arma a 0.002 BRUTO, recuo ZERO, 1 tick contra fecha
         _rate = self._fee_rate()
         if slot["side"]=="buy":
             if current_price > float(slot.get("best_price", _open)): slot["best_price"]=current_price
@@ -373,7 +374,7 @@ class MinimalistGridEngine:
         _rate = self._fee_rate()
         for o in self.orders_state:
             if o.get("status") != "ACTIVE": continue
-            _op = float(o.get("open_price", o["entry_price"]))
+            _op = float(o["entry_price"])
             _gross = (current_price - _op)*o["qty"] if o["side"]=="buy" else (_op - current_price)*o["qty"]
             _f += _gross - _rate*(_op + current_price)*o["qty"]
         return self.cfg.cofre + _f
@@ -441,7 +442,7 @@ class MinimalistGridEngine:
         _rate=self._fee_rate()
         for o in list(self.orders_state):
             if o.get("status")!="ACTIVE": continue
-            _op=float(o.get("open_price", o["entry_price"]))
+            _op=float(o["entry_price"])
             _gross=(_px-_op)*o["qty"] if o["side"]=="buy" else (_op-_px)*o["qty"]
             _fee=_rate*(_op+_px)*o["qty"]
             _net=_gross-_fee
