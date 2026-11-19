@@ -1,9 +1,8 @@
-# trading.py - ND-SCALPING V6 - ALVO + TRAVA RIGIDA SEM RECUO
-# MUDANCA: alvo e trava no mesmo ponto 0.002, sem percentagem, sem recuo.
+# trading.py - ND-SCALPING V6 - TRAVA RIGIDA SEM RECUO
+# MUDANCA UNICA: trava sem percentagem, sem recuo.
 # O resto do V6 NAO foi alterado: grid, espelho, reentrada, convergencia, cofre.
-# Alvo = 0.002 BRUTO (objetivo principal). Quando bate 0.002, a trava arma.
-# Depois acompanha o melhor preco, 1 tick contra e fecha.
-# Alvo e trava funcionam juntos, nao um sem o outro.
+# Trava: arma a 0.002 BRUTO, acompanha o melhor preco, 1 tick contra e fecha.
+# O alvo NAO fecha sozinho. So a trava fecha.
 
 import os, time, threading, math
 from datetime import datetime, timezone
@@ -17,9 +16,8 @@ LEVERAGE = float(os.getenv("LEVERAGE", "3"))
 GRID_STEP = float(os.getenv("GRID_STEP", "20"))  # espacamento em preco
 GRID_TOTAL = int(os.getenv("GRID_TOTAL", "14"))  # 7 long + 7 short
 PROFIT_TARGET_USDT = float(os.getenv("PROFIT_TARGET_USDT", "5"))
-# Alvo + trava rigida - fixos no codigo, nunca em Ajustes
-ALVO_BRUTO = 0.002
-TRAVA_ARMAR_BRUTO = 0.002  # mesmo ponto do alvo
+# Trava rigida - fixo no codigo, nunca em Ajustes
+TRAVA_ARMAR_BRUTO = 0.002
 FEE_RATE = 0.0001  # 0.01% maker papel
 
 state = {
@@ -121,12 +119,10 @@ def _mirror(slot, price):
         "armed": False, "best_gross": 0.0,
     })
 
-# ---------- MONITOR - AQUI ESTAO O ALVO E A TRAVA RIGIDA ----------
+# ---------- MONITOR - AQUI ESTA A TRAVA RIGIDA ----------
 def monitor(price):
-    """Chamado a cada tick de preco. Alvo e trava juntos.
-    ALVO = 0.002: quando bate, a trava arma. Depois acompanha ate ao melhor
-    preco. No primeiro tick contra, fecha - seja porque bateu no alvo e recuou
-    logo, seja porque foi ate 0.0114 e recuou."""
+    """Chamado a cada tick de preco. So a trava fecha.
+    ALVO NAO FECHA SOZINHO - removido para a trava poder trabalhar."""
     with state["lock"]:
         if not state["running"]:
             return
@@ -146,9 +142,9 @@ def monitor(price):
             qty = slot["qty"]
             entry = slot["entry"]
             gross = _gross(slot["side"], entry, price, qty)
-            # ===== ALVO + TRAVA RIGIDA - SEM PERCENTAGEM, SEM RECUO =====
-            # 1. Alvo 0.002 BRUTO: quando bate, a trava arma
-            if gross >= ALVO_BRUTO:
+            # ===== TRAVA RIGIDA - SEM PERCENTAGEM, SEM RECUO =====
+            # 1. Arma a 0.002 BRUTO (o valor que vês no ecrã)
+            if gross >= TRAVA_ARMAR_BRUTO:
                 slot["armed"] = True
             # 2. Acompanha ate ao melhor preco - piso sobe junto
             if slot["armed"]:
@@ -156,13 +152,13 @@ def monitor(price):
                     slot["best_gross"] = gross
                 # 3. Um tick contra e fecha - piso == melhor, sem margem
                 if gross < slot["best_gross"]:
-                    _close_slot(slot, price, "ALVO + TRAVA")
+                    _close_slot(slot, price, "TRAVA")
                     # Espelho V6 mantido
                     _mirror(slot, price)
                     continue
-            # NOTA: alvo e trava no mesmo ponto 0.002.
-            # Antes o alvo nao fechava sozinho e a trava parecia trabalhar sozinha.
-            # Agora o alvo e o objetivo principal: bate 0.002, arma, acompanha e fecha no primeiro recuo.
+            # NOTA: nao ha _hit_alvo aqui de proposito.
+            # Antes o alvo fechava a 0.0014 e a trava nunca chegava a armar a 0.002.
+            # Agora so a trava fecha, por isso o lucro nao se perde no recuo.
         # Vantagem / convergencia (inalterado)
         total = sum(_net(s["side"], s["entry"], price, s["qty"]) for s in state["slots"] if s["status"] == "ACTIVE")
         state["vantagem"] = total
