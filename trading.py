@@ -2,12 +2,11 @@ import time, threading, logging, json, os
 from config import TOP_PAIRS
 logger = logging.getLogger("ND-Trading")
 STATE_FILE = "state.json"
-# TRAVA DE SEGURANCA - codigo fonte, NUNCA em Ajustes. Sempre ligada.
-# Quando a ordem ja cobre as taxas + TRAVA_MIN_NET, a trava arma e o stop dinamico
-# segue o melhor preco (nunca desce). Se o preco recuar ate ao stop, fecha ainda
-# positiva, mesmo sem atingir o alvo. Ordens que nunca armam comportam-se como antes.
-TRAVA_MIN_NET = 0.002      # USDT liquido minimo trancado por ordem
-TRAVA_TRAIL_FRAC = 0.4     # stop segue a 40% do passo atras do melhor preco
+# TRAVA ZERO RECUO - codigo fonte, NUNCA em Ajustes. Sempre ligada.
+# Acompanha o melhor preco desde a ativacao de cada ordem. Arma quando a ordem
+# cobre as taxas (lucro liquido > 0). Depois de armada, QUALQUER tick no sentido
+# oposto fecha a ordem no preco atual - zero recuo. Ordens que nunca armam
+# comportam-se como antes (alvo ou espera).
 
 class MinimalistGridEngine:
     def __init__(self, exchange_manager, config):
@@ -25,6 +24,7 @@ class MinimalistGridEngine:
         self.last_price=0.0
         self.last_tick_time=0.0  # V5: watchdog - ultimo tick do motor
         self.closed_orders=[]  # V6: historico = ordens FECHADAS, cada uma com o seu lucro
+        self.bloquear_novas=False  # V6 FINAL: Cofre atingiu o lucro -> sem novas ordens
         self.per_side=7  # V6: total 14 = 7 LONG + 7 SHORT (Ajustes)
         self.grid_step=20.0
         self.first_dist=10.0
@@ -219,13 +219,12 @@ class MinimalistGridEngine:
             else:
                 equity=self.ex.get_total_equity()
                 if equity<0: return
+            # V6 FINAL: Cofre atingiu o lucro -> sem novas ordens (espelhos e extensao bloqueados).
+            _lucro_cfg = float(getattr(self.cfg, "lucro_por_operacao", 0) or 0)
+            self.bloquear_novas = (_lucro_cfg > 0 and self.cfg.cofre >= _lucro_cfg)
             if self.cfg.cycle_initial_equity>0:
                 net=equity-self.cfg.cycle_initial_equity
-                target=self.cfg.cycle_initial_equity*(self.cfg.target_profit_pct/100)
                 maxloss=self.cfg.cycle_initial_equity*(self.cfg.max_loss_pct/100)
-                if net>=target:
-                    logger.info(f"META atingida +{net:.2f} {'[PAPEL]' if self._is_paper() else '[REAL]'}")
-                    self.close_entire_cycle(symbol, reason="Meta Atingida"); self._handle_post_cycle_transition(); return
                 if net<=-maxloss:
                     logger.info(f"STOP GLOBAL {net:.2f}")
                     self.close_entire_cycle(symbol, reason="Stop Global"); self.cfg.is_running=False; self.cfg.active_symbol=None; self._save_state(); return
@@ -233,6 +232,10 @@ class MinimalistGridEngine:
             for slot in list(self.orders_state):
                 if slot["status"] in ("PENDING","ACTIVE"): self._monitor_position(symbol, slot, current_price)
             self._extend_grid(symbol, current_price)
+            # V6 FINAL: regra da vantagem - se fechar tudo agora e ficar >= lucro definido, encerra a operacao.
+            if _lucro_cfg > 0 and self._vantagem(symbol, current_price) >= _lucro_cfg:
+                self._encerrar_operacao(symbol, reason="Lucro Operacao")
+                return
             _rest=[o for o in self.orders_state if o["status"] in ("PENDING","ACTIVE")]
             if len(self.orders_state)>=2 and len(_rest)==0:
                 try: self.cfg.cofre_global+=self.cfg.cofre
@@ -314,18 +317,15 @@ class MinimalistGridEngine:
             if current_price > float(slot.get("best_price", _open)): slot["best_price"]=current_price
         else:
             if current_price < float(slot.get("best_price", _open)): slot["best_price"]=current_price
-        # TRAVA: arma quando a ordem ja cobre as taxas + TRAVA_MIN_NET.
+        # TRAVA ZERO RECUO: arma quando a ordem ja cobre as taxas (lucro liquido > 0).
+        # Depois de armada, QUALQUER tick no sentido oposto fecha a ordem no preco atual.
         _rate = self._fee_rate()
         _fee_rt = 2*_rate*_open*_qty  # taxas ida+volta (aprox)
-        _lock_move = (_fee_rt + TRAVA_MIN_NET)/_qty if _qty>0 else 0
-        _step_t = float(slot.get("grid_step", 0) or getattr(self, "grid_step", 0) or self.cfg.grid_step_price or 0)
-        if _step_t<=0: _step_t=20.0
-        _trail = _step_t*TRAVA_TRAIL_FRAC
+        _lock_move = _fee_rt/_qty if _qty>0 else 0  # movimento ate ao breakeven
         _best = float(slot.get("best_price", _open))
         if slot["side"]=="buy":
             _locked = _open + _lock_move
-            _stop = max(_locked, _best - _trail)
-            _hit_trava = (_best > _locked) and (current_price <= _stop)
+            _hit_trava = (_best > _locked) and (current_price < _best)
             _hit_alvo = current_price >= _tgt
             if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"sell",slot["qty"],current_price,position_idx=1,reduce_only=True)
@@ -345,8 +345,7 @@ class MinimalistGridEngine:
                 return
         else:
             _locked = _open - _lock_move
-            _stop = min(_locked, _best + _trail)
-            _hit_trava = (_best < _locked) and (current_price >= _stop)
+            _hit_trava = (_best < _locked) and (current_price > _best)
             _hit_alvo = current_price <= _tgt
             if _hit_alvo or _hit_trava:
                 closed=self._place(symbol,"buy",slot["qty"],current_price,position_idx=2,reduce_only=True)
@@ -370,6 +369,7 @@ class MinimalistGridEngine:
         # SHORT fecha a C -> LONG PENDING a C+passo, alvo C+2*passo. Ao fechar, cria outro de volta.
         # Sem duplicados: se ja existe PENDING/ACTIVE do mesmo lado na mesma entrada, nao cria outro.
         try:
+            if getattr(self, "bloquear_novas", False): return  # V6 FINAL: Cofre atingiu o lucro - sem novas ordens
             _step=float(getattr(self, "grid_step", 0) or 0)
             if _step<=0: return
             if side=="sell":
@@ -388,6 +388,7 @@ class MinimalistGridEngine:
     def _extend_grid(self, symbol, current_price):
         # V6: se o preco foge para la da ponta do grid, o grid estende-se sozinho (1 nivel por tick, max 200 ordens).
         try:
+            if getattr(self, "bloquear_novas", False): return  # V6 FINAL: Cofre atingiu o lucro - sem novas ordens
             if len(self.orders_state)>=200: return
             _step=float(getattr(self, "grid_step", 0) or 0)
             if _step<=0: return
@@ -413,6 +414,36 @@ class MinimalistGridEngine:
     @history.setter
     def history(self, v):
         self.closed_orders = list(v or [])
+    def _vantagem(self, symbol, current_price):
+        # V6 FINAL: quanto fica a operacao se fechar TUDO agora (Cofre + flutuante liquido de taxas).
+        _f = 0.0
+        _rate = self._fee_rate()
+        for o in self.orders_state:
+            if o.get("status") != "ACTIVE": continue
+            _op = float(o.get("open_price", o["entry_price"]))
+            _gross = (current_price - _op)*o["qty"] if o["side"]=="buy" else (_op - current_price)*o["qty"]
+            _f += _gross - _rate*(_op + current_price)*o["qty"]
+        return self.cfg.cofre + _f
+
+    def _encerrar_operacao(self, symbol, reason="Lucro Operacao"):
+        # V6 FINAL: fecha tudo (negativas podem fechar com perda - o saldo positivo cobre-as),
+        # Cofre vai para o principal/global. Manual: para. Auto: nova operacao com as mesmas configuracoes.
+        self.close_entire_cycle(symbol, reason=reason)
+        self._fold_cofre_to_principal()
+        self.cfg.completed_operations += 1
+        _modo = getattr(self.cfg, "modo_operacao", "manual")
+        _limite = int(getattr(self.cfg, "operacoes_por_dia", 0) or 0)
+        if _modo == "auto" and (_limite <= 0 or self.cfg.completed_operations < _limite):
+            self.cfg.status_message = f"Auto ({self.cfg.completed_operations}): nova operacao {symbol}"
+            self.bloquear_novas = False
+            self.initialize_cycle(symbol)
+        else:
+            self.cfg.is_running = False
+            self.cfg.active_symbol = None
+            self.reference_price = 0.0
+            self.cfg.status_message = "Operacao encerrada. Aguardando Start."
+        self._save_state()
+
     def _check_convergence(self, symbol, current_price):
         act=[o for o in self.orders_state if o["status"]=="ACTIVE"]
         if len(act)<2: return
