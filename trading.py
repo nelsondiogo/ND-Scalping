@@ -4,7 +4,7 @@
 # Trava: arma a 0.002 BRUTO, acompanha o melhor preco, 1 tick contra e fecha.
 # O alvo NAO fecha sozinho. So a trava fecha.
 
-import os, time, threading, math, json, urllib.request
+import os, time, threading, math
 from datetime import datetime, timezone
 
 # ---------- CONFIG (lida do ambiente / Ajustes) ----------
@@ -32,8 +32,6 @@ state = {
     "cofre_global": 0.0,
     "vantagem": 0.0,
     "lock": threading.Lock(),
-    "price_error": None,
-    "last_price_at": None,
 }
 
 def _now():
@@ -126,11 +124,9 @@ def monitor(price):
     """Chamado a cada tick de preco. So a trava fecha.
     ALVO NAO FECHA SOZINHO - removido para a trava poder trabalhar."""
     with state["lock"]:
-        if not price or price <= 0:
-            return
-        state["price"] = price
         if not state["running"]:
             return
+        state["price"] = price
         ref = state["ref"]
         for slot in list(state["slots"]):
             # Ativar PENDING quando o preco toca a entrada
@@ -188,135 +184,4 @@ def get_state():
             "vantagem": round(state["vantagem"], 4),
             "actives": actives,
             "history": state["history"][-100:],
-            "slots": state["slots"],
-            "current_price": state["price"],
-            "status": "RUNNING" if state["running"] else "PARADO",
-            "paper": PAPER_TRADING,
-            "connected": True,
-            "price_error": state.get("price_error"),
-            "last_price_at": state.get("last_price_at"),
         }
-
-
-# ---------- PRECO REAL - ADICAO UNICA, NAO TOCA NA TRAVA / GRID ----------
-# Kraken -> Bitstamp -> Binance -> Bybit -> CoinGecko. Nunca devolve 0 se ja houver preco.
-def fetch_price():
-    try:
-        req = urllib.request.Request("https://api.kraken.com/0/public/Ticker?pair=XBTUSD", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["result"]["XXBTZUSD"]["c"][0])
-            if p > 0:
-                with state["lock"]:
-                    state["price"] = p; state["last_price_at"] = _now(); state["price_error"] = None
-                return p
-    except Exception as e:
-        pass
-    try:
-        req = urllib.request.Request("https://www.bitstamp.net/api/v2/ticker/btcusd/", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["last"])
-            if p > 0:
-                with state["lock"]:
-                    state["price"] = p; state["last_price_at"] = _now(); state["price_error"] = None
-                return p
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["price"])
-            if p > 0:
-                with state["lock"]:
-                    state["price"] = p; state["last_price_at"] = _now(); state["price_error"] = None
-                return p
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["result"]["list"][0]["lastPrice"])
-            if p > 0:
-                with state["lock"]:
-                    state["price"] = p; state["last_price_at"] = _now(); state["price_error"] = None
-                return p
-    except Exception:
-        pass
-    try:
-        req = urllib.request.Request("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["bitcoin"]["usd"])
-            if p > 0:
-                with state["lock"]:
-                    state["price"] = p; state["last_price_at"] = _now(); state["price_error"] = None
-                return p
-    except Exception:
-        pass
-    with state["lock"]:
-        state["price_error"] = "sem preco - a manter ultimo"
-    return state.get("price", 0.0) or 0.0
-
-class MinimalistGridEngine:
-    def __init__(self, *a, **k):
-        self.state = state; self._bg_thread = None; self._bg_stop = threading.Event(); self._bg_running = False
-    def start_cycle(self, price, ref=None):
-        return start_cycle(price, ref)
-    def start(self, price=None, ref=None):
-        return start_cycle(price, ref) if price is not None else True
-    def monitor(self, price):
-        return monitor(price)
-    def tick(self, price):
-        return monitor(price)
-    def update(self, price):
-        return monitor(price)
-    def on_price(self, price):
-        return monitor(price)
-    def stop_cycle(self, price=0, manual=True):
-        return stop_cycle(price, manual)
-    def stop(self, price=0, manual=True):
-        return stop_cycle(price, manual)
-    def get_state(self):
-        return get_state()
-    def get_status(self):
-        return get_state()
-    def status(self):
-        return get_state()
-    def get_history(self):
-        return get_state()["history"]
-    def get_balance(self):
-        return get_state()["balance"]
-    def start_background_loop(self, *a, **k):
-        if self._bg_running:
-            return True
-        self._bg_stop.clear(); self._bg_running = True
-        def _loop():
-            while not self._bg_stop.is_set():
-                try:
-                    p = fetch_price()
-                    if p and p > 0:
-                        monitor(p)
-                except Exception:
-                    pass
-                time.sleep(2)
-        t = threading.Thread(target=_loop, daemon=True, name="nd-background-loop")
-        t.start(); self._bg_thread = t; return True
-    def stop_background_loop(self, *a, **k):
-        self._bg_stop.set(); self._bg_running = False; return True
-    def start_loop(self, *a, **k):
-        return self.start_background_loop(*a, **k)
-    def background_loop(self, *a, **k):
-        return self.start_background_loop(*a, **k)
-    def run(self, *a, **k):
-        return self.start_background_loop(*a, **k)
-    def __getattr__(self, name):
-        if name.startswith("get_") or name in ("status", "state", "balance", "history"):
-            return lambda *a, **k: get_state()
-        return lambda *a, **k: True
-
-GridEngine = MinimalistGridEngine
-TradingEngine = MinimalistGridEngine
-Engine = MinimalistGridEngine
