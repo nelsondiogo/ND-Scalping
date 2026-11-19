@@ -3,7 +3,10 @@ from config import TOP_PAIRS
 logger = logging.getLogger("ND-Trading")
 STATE_FILE = "state.json"
 # TRAVA RIGIDA - codigo fonte, NUNCA em Ajustes. Sempre ligada.
-# Arma quando o lucro BRUTO da ordem >= 0.002 USDT.
+# Arma quando o lucro LIQUIDO >= 0.002 USDT, ou seja BRUTO >= TAXA + 0.002.
+# A taxa depende do volume: taxa = fee_rate * (entrada+saida) * qty.
+# Ex. tua config BTC Papel: margem 25 x alav 3 = 75 notional, qty 0.001188, taxa ~0.015 -> arma a bruto ~0.017.
+# Ex. BTC Real: taxa ~0.0825 -> arma a bruto ~0.0845. Automatico, nao e fixo.
 # Depois de armada, fecha no 1o tick contra (recuo ZERO).
 # Nunca armou = nunca fecha por trava, espera pelo alvo.
 
@@ -274,8 +277,10 @@ class MinimalistGridEngine:
         _open = float(slot["entry_price"])
         slot["open_price"] = _open
         _qty = float(slot.get("qty", 0) or 0)
-        # TRAVA RIGIDA: usa entry_price = o que o ecra mostra. open_price antigo era o preco do tick e nunca armava.: arma a 0.002 BRUTO, recuo ZERO, 1 tick contra fecha
+        # TRAVA RIGIDA: arma a TAXA + 0.002 LIQUIDO, recuo ZERO, 1 tick contra fecha
         _rate = self._fee_rate()
+        _fee_est = _rate * (_open + current_price) * _qty
+        _arm_gross = _fee_est + 0.002
         if slot["side"]=="buy":
             if current_price > float(slot.get("best_price", _open)): slot["best_price"]=current_price
             _gross_now = (current_price - _open)*_qty
@@ -285,7 +290,7 @@ class MinimalistGridEngine:
         if _gross_now > float(slot.get("best_gross", 0.0)):
             slot["best_gross"] = _gross_now
         _best_gross = float(slot.get("best_gross", 0.0))
-        _armed = _best_gross >= 0.002
+        _armed = _best_gross >= _arm_gross
         _hit_trava = _armed and (_gross_now < _best_gross)
         if slot["side"]=="buy":
             _hit_alvo = current_price >= _tgt
