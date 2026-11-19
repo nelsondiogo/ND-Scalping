@@ -1,7 +1,6 @@
-# trading.py - ND-SCALPING V6 - ALVO + TRAVA RIGIDA - CORRECAO LEVE: LIGACAO / PRECO
+# trading.py - ND-SCALPING V6 - ALVO + TRAVA RIGIDA
 # ALVO + TRAVA 0.002 BRUTO, sem %, sem recuo. Alvo arma, trava acompanha, 1 tick contra fecha.
-# CORRECAO: start_background_loop agora busca preco real BTC/USDT na Bybit publica a cada 2s.
-# Sem isso o preco ficava -- e o frontend dizia "Sem ligacao ao servidor".
+# PRECO: multi-fonte Binance -> Bybit -> Coinbase. Nunca poe preco a 0. Se falhar, mantem ultimo.
 import os, time, threading, json, urllib.request
 from datetime import datetime, timezone
 
@@ -26,21 +25,33 @@ def _net(side, entry, price, qty):
     return _gross(side, entry, price, qty) - FEE_RATE * (entry + price) * qty
 
 def fetch_price():
-    """Preco publico Bybit, sem chave. Se falhar, devolve o ultimo preco."""
-    try:
-        req = urllib.request.Request("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", headers={"User-Agent": "ND-Scalping"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            d = json.loads(r.read().decode())
-            p = float(d["result"]["list"][0]["lastPrice"])
-            with state["lock"]:
-                state["price"] = p
-                state["last_price_at"] = _now()
-                state["price_error"] = None
-            return p
-    except Exception as e:
-        with state["lock"]:
-            state["price_error"] = str(e)[:120]
-        return state.get("price", 0.0) or 0.0
+    urls = [
+        ("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", "binance"),
+        ("https://api.bybit.com/v5/market/tickers?category=linear&symbol=BTCUSDT", "bybit"),
+        ("https://api.coinbase.com/v2/prices/BTC-USD/spot", "coinbase"),
+    ]
+    for url, kind in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ND-Scalping"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                d = json.loads(r.read().decode())
+                if kind == "binance":
+                    p = float(d["price"])
+                elif kind == "bybit":
+                    p = float(d["result"]["list"][0]["lastPrice"])
+                else:
+                    p = float(d["data"]["amount"])
+                if p and p > 0:
+                    with state["lock"]:
+                        state["price"] = p
+                        state["last_price_at"] = _now()
+                        state["price_error"] = None
+                    return p
+        except Exception:
+            continue
+    with state["lock"]:
+        state["price_error"] = "sem preco - a manter ultimo"
+    return state.get("price", 0.0) or 0.0
 
 def start_cycle(price, ref=None):
     with state["lock"]:
@@ -86,6 +97,8 @@ def _mirror(slot, price):
 
 def monitor(price):
     with state["lock"]:
+        if not price or price <= 0:
+            return
         if not state["running"]:
             state["price"] = price
             return
@@ -124,7 +137,6 @@ def get_state():
                 g = _gross(s["side"], s["entry"], state["price"], s["qty"])
                 n = _net(s["side"], s["entry"], state["price"], s["qty"])
                 actives.append({**s, "gross": round(g, 4), "net": round(n, 4)})
-        # Chaves extra para o frontend nao dizer "Sem ligacao": status, current_price, etc.
         return {"running": state["running"], "status": "RUNNING" if state["running"] else "PARADO", "ref": state["ref"], "price": state["price"], "current_price": state["price"], "preco_atual": state["price"], "balance": round(state["balance"], 4), "initial": state["initial_balance"], "cofre_ciclo": round(state["cofre_ciclo"], 4), "cofre_global": round(state["cofre_global"], 4), "vantagem": round(state["vantagem"], 4), "actives": actives, "history": state["history"][-100:], "slots": state["slots"], "paper": PAPER_TRADING, "connected": True, "last_price_at": state["last_price_at"], "price_error": state["price_error"]}
 
 class MinimalistGridEngine:
@@ -167,12 +179,10 @@ class MinimalistGridEngine:
         self._bg_stop.clear()
         self._bg_running = True
         def _loop():
-            # Busca preco real e alimenta o monitor. Mesmo parado, atualiza o preco para o Dashboard nao ficar --.
             while not self._bg_stop.is_set():
                 try:
                     p = fetch_price()
                     if p and p > 0:
-                        # monitor() ja atualiza preco mesmo parado e corre a trava se estiver a correr
                         monitor(p)
                 except Exception:
                     pass
